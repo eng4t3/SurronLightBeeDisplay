@@ -41,7 +41,7 @@ jobs:
         id: fw
         run: |
           set -e
-          VERSION=$(grep -oP '(?<=#define FW_VERSION\s{1,10}")[^"]+' "$SKETCH_DIR/version.h")
+          VERSION=$(sed -n 's/^#define FW_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' "$SKETCH_DIR/version.h" | tr -d '\r')
           if [ -z "$VERSION" ]; then
             echo "::error::Could not find FW_VERSION in $SKETCH_DIR/version.h"
             exit 1

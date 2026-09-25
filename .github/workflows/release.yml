@@ -1,0 +1,197 @@
+name: Build and Release Firmware
+
+# Builds the WheelieAssist ESP32-S3 sketch and, for pushed "vX.Y.Z" tags,
+# publishes a GitHub Release with the files riders need:
+#   WheelieAssist-<version>.bin       -> upload via the on-device web OTA updater
+#   WheelieAssist-<version>-full.bin  -> full image (bootloader+partitions+app),
+#                                         flash at 0x0 over USB for first-time
+#                                         installs, partition-table changes, or
+#                                         recovering a device that won't boot
+#   WheelieAssist-<version>.bin.md5, SHA256SUMS.txt -> integrity checks
+#
+# A manual run (workflow_dispatch) does the same build but skips the
+# tag/version check and uploads the files as a workflow artifact instead of
+# creating a release.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+# Needed so the workflow can create/attach files to a GitHub Release.
+permissions:
+  contents: write
+
+env:
+  SKETCH_DIR: Main
+  BUILD_DIR: build-output
+  FQBN: esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc
+  ESP32_CORE_VERSION: 3.3.8
+  ESP32_BOARD_INDEX: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Read FW_VERSION from Main/version.h
+        id: fw
+        run: |
+          set -e
+          VERSION=$(grep -oP '(?<=#define FW_VERSION\s{1,10}")[^"]+' "$SKETCH_DIR/version.h")
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not find FW_VERSION in $SKETCH_DIR/version.h"
+            exit 1
+          fi
+          echo "Firmware version in version.h: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches FW_VERSION
+        # workflow_dispatch runs have no release tag to check against.
+        if: github.event_name == 'push'
+        run: |
+          set -e
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          FILE_VERSION="${{ steps.fw.outputs.version }}"
+          echo "Tag:        $GITHUB_REF_NAME (version $TAG_VERSION)"
+          echo "version.h:  $FILE_VERSION"
+          if [ "$TAG_VERSION" != "$FILE_VERSION" ]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' does not match FW_VERSION \"$FILE_VERSION\" in $SKETCH_DIR/version.h. Bump FW_VERSION, commit, and re-tag (e.g. 'git tag v$FILE_VERSION')."
+            exit 1
+          fi
+
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Cache arduino-cli data (cores/libraries)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: arduino-${{ runner.os }}-esp32-${{ env.ESP32_CORE_VERSION }}
+
+      - name: Configure arduino-cli
+        run: |
+          set -e
+          arduino-cli config init --overwrite
+          # JC3248W535EN-Touch-LCD is not in the Library Manager index, so it
+          # has to be installed straight from its git repo. That requires
+          # explicitly allowing "unsafe" (non-index) library installs.
+          arduino-cli config set library.enable_unsafe_install true
+          arduino-cli config add board_manager.additional_urls "$ESP32_BOARD_INDEX"
+
+      - name: Install esp32 board core
+        run: |
+          set -e
+          arduino-cli core update-index
+          arduino-cli core install "esp32:esp32@${ESP32_CORE_VERSION}"
+
+      - name: Install required libraries
+        run: |
+          set -e
+          # Library Manager names below were matched by hand against the
+          # library index; if any of these fail to resolve, check the exact
+          # listed name at https://www.arduinolibraries.info first.
+          arduino-cli lib install "GFX Library for Arduino@1.6.6"   # moononournation/Arduino_GFX - display driver used by the LCD library
+          arduino-cli lib install "Adafruit GFX Library"            # font/graphics primitives
+          arduino-cli lib install "Adafruit BusIO"                  # dependency of Adafruit GFX
+          arduino-cli lib install "JPEGDecoder"                     # Bodmer/JPEGDecoder - logo/splash decoding
+
+          # Guition JC3248W535 touch+display driver, not on the Library
+          # Manager index -> install directly from GitHub.
+          arduino-cli lib install --git-url https://github.com/AudunKodehode/JC3248W535EN-Touch-LCD
+
+      - name: Compile sketch
+        run: |
+          set -e
+          mkdir -p "$BUILD_DIR"
+          arduino-cli compile \
+            --fqbn "$FQBN" \
+            --export-binaries \
+            --output-dir "$BUILD_DIR" \
+            "$SKETCH_DIR"
+
+      - name: Package release files
+        id: package
+        run: |
+          set -e
+          VERSION="${{ steps.fw.outputs.version }}"
+          OTA_NAME="WheelieAssist-${VERSION}.bin"
+          FULL_NAME="WheelieAssist-${VERSION}-full.bin"
+
+          # arduino-cli names exported binaries after the sketch's .ino file
+          # (Main/Main.ino -> Main.ino.*), not the containing folder or FQBN.
+          if [ ! -f "$BUILD_DIR/Main.ino.bin" ]; then
+            echo "::error::Expected $BUILD_DIR/Main.ino.bin, but it was not produced by the build."
+            ls -la "$BUILD_DIR"
+            exit 1
+          fi
+          if [ ! -f "$BUILD_DIR/Main.ino.merged.bin" ]; then
+            echo "::error::Expected $BUILD_DIR/Main.ino.merged.bin (full merged image), but it was not produced by the build."
+            ls -la "$BUILD_DIR"
+            exit 1
+          fi
+
+          cp "$BUILD_DIR/Main.ino.bin" "$BUILD_DIR/$OTA_NAME"
+          # The core pads the merged image to the full 16 MB flash size.
+          # Strip the trailing 0xFF erase-fill so the download is ~1.5 MB.
+          python3 -c "import sys; d=open(sys.argv[1],'rb').read().rstrip(b'\xff'); d+=b'\xff'*(-len(d)%16); open(sys.argv[2],'wb').write(d)" \
+            "$BUILD_DIR/Main.ino.merged.bin" "$BUILD_DIR/$FULL_NAME"
+
+          ( cd "$BUILD_DIR" && md5sum "$OTA_NAME" > "${OTA_NAME}.md5" )
+          ( cd "$BUILD_DIR" && sha256sum "$OTA_NAME" "$FULL_NAME" > SHA256SUMS.txt )
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "ota_path=$BUILD_DIR/$OTA_NAME" >> "$GITHUB_OUTPUT"
+          echo "full_path=$BUILD_DIR/$FULL_NAME" >> "$GITHUB_OUTPUT"
+          echo "md5_path=$BUILD_DIR/${OTA_NAME}.md5" >> "$GITHUB_OUTPUT"
+          echo "sha_path=$BUILD_DIR/SHA256SUMS.txt" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: WheelieAssist ${{ steps.package.outputs.version }}
+          files: |
+            ${{ steps.package.outputs.ota_path }}
+            ${{ steps.package.outputs.full_path }}
+            ${{ steps.package.outputs.md5_path }}
+            ${{ steps.package.outputs.sha_path }}
+          body: |
+            ## WheelieAssist ${{ steps.package.outputs.version }}
+
+            **Updating over WiFi (normal update, most riders):**
+            Download `WheelieAssist-${{ steps.package.outputs.version }}.bin`
+            to your phone *before* joining the dashboard's hotspot (the
+            hotspot has no internet access). Then on the dashboard: Settings
+            -> WIFI tab -> turn on the update hotspot -> scan the QR code (or
+            join `WheelieAssist-XXXX` manually) -> open `http://192.168.4.1`
+            -> choose the file -> Install. The bike must be stationary.
+
+            **USB recovery flash:**
+            `WheelieAssist-${{ steps.package.outputs.version }}-full.bin` is the
+            full image (bootloader + partitions + app), flashed at offset `0x0`
+            with esptool. **It erases the settings/odometer area (NVS)** —
+            only use it to recover a device that won't boot. For a normal
+            first install, upload from the Arduino IDE or `build.ps1 -Upload`
+            instead (those keep NVS). Do **not** use this file for the web
+            updater.
+
+            Checksums are in `SHA256SUMS.txt`.
+          generate_release_notes: true
+
+      - name: Upload build artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: WheelieAssist-${{ steps.package.outputs.version }}
+          path: |
+            ${{ steps.package.outputs.ota_path }}
+            ${{ steps.package.outputs.full_path }}
+            ${{ steps.package.outputs.md5_path }}
+            ${{ steps.package.outputs.sha_path }}
+          if-no-files-found: error

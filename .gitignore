@@ -1,0 +1,31 @@
+# --- Build output ---
+/build/
+/build-output/
+*.bin
+*.elf
+*.map
+*.hex
+*.uf2
+
+# --- Arduino IDE / arduino-cli local state ---
+.arduino15/
+.arduino-cli.yaml
+Main/build/
+Main/*.ino.bin
+
+# --- Editor / OS cruft ---
+.vscode/*
+!.vscode/extensions.json
+.vs/
+*.suo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Misc local artifacts ---
+*.log
+*.tmp
+*~
+
+# Third-party reference material (kept locally, not published)
+Main/surron_hacking/

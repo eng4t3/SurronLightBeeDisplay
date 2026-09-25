@@ -43,12 +43,16 @@
 
 #define PIN_SPEED_SENSOR 17  // Speed pulse signal (4-pin Extended IO P3/P4 Pin 3)
 
-// Sur-Ron 2025 Light Bee X speed pulse calibration
+// Sur-Ron 2025 Light Bee X speed pulse calibration (18" rear wheel)
 const float WHEEL_CIRCUMFERENCE_M  = 1.88f;
 const float PULSES_PER_WHEEL_REV   = 77.65f;
 const float METERS_PER_SPEED_PULSE = WHEEL_CIRCUMFERENCE_M / PULSES_PER_WHEEL_REV;  // ~0.02421 m
 
 const float KMH_TO_MPH = 0.621371f;
+
+// Factory default for the speed calibration multiplier: 1.10 matches GPS on a
+// 2025 Light Bee X with the 18" rear wheel. Only used when NVS has no value.
+const float DEFAULT_SPEED_CAL = 1.10f;
 
 // Pulse engine timing (64-bit esp_timer microseconds: no 71-minute micros() wrap)
 const uint32_t SPEED_DEBOUNCE_US = 500;       // 100+ km/h is ~870 us/pulse
@@ -200,7 +204,7 @@ volatile int screen_brightness = 255;
 volatile bool imperial_mode = false;
 volatile bool theme_light = false;
 volatile bool demo_mode = false;       // hidden: hold the SETTINGS title for 3 s
-volatile float speed_cal = 1.00f;
+volatile float speed_cal = DEFAULT_SPEED_CAL;
 volatile bool speed_filter_oem = false;
 volatile Language current_lang = LANG_EN;
 
@@ -440,7 +444,7 @@ static void loadSettings() {
   PersistState p;
   preferences.begin(NVS_NS, true);
   p.bright = preferences.getInt("bright", 255);
-  p.cal = preferences.getFloat("speed_cal", 1.00f);
+  p.cal = preferences.getFloat("speed_cal", DEFAULT_SPEED_CAL);
   p.oem = preferences.getBool("filter_oem", false);
   p.odo = preferences.getDouble("odo", 0.0);
   p.trip = preferences.getDouble("trip", 0.0);
@@ -455,7 +459,7 @@ static void loadSettings() {
 
   // Validate everything (NaN-safe: constrain() lets NaN through)
   p.bright = constrain(p.bright, 20, 255);
-  if (!(p.cal >= 0.50f && p.cal <= 2.00f)) p.cal = 1.00f;
+  if (!(p.cal >= 0.50f && p.cal <= 2.00f)) p.cal = DEFAULT_SPEED_CAL;
   p.cal = roundf(p.cal * 100.0f) / 100.0f;
   if (!(p.odo >= 0.0 && p.odo < 1.0e7)) p.odo = 0.0;
   if (!(p.trip >= 0.0 && p.trip < 1.0e7)) p.trip = 0.0;

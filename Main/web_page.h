@@ -193,7 +193,7 @@ api('/api/telemetry',{},2500).then(function(d){fails=0;dot('ok');imp=!!d.imperia
 var f=imp?0.621371:1,dl=imp?'mi':'km',sl=imp?'mph':'km/h';
 var sp=d.speed_kmh*f;$('spd').textContent=Math.round(sp);$('su').textContent=sl;
 $('sb').style.width=Math.min(100,d.speed_kmh/85*100)+'%';
-$('odo').textContent=(d.odo_km*f).toFixed(d.odo_km*f<1000?1:0);
+$('odo').textContent=(d.odo_km*f).toFixed(d.odo_km*f<999.95?1:0);
 $('trip').textContent=(d.trip_km*f).toFixed(1);
 $('max').textContent=Math.round(d.max_speed_kmh*f);
 [].forEach.call(document.querySelectorAll('.du'),function(e){e.textContent=dl});

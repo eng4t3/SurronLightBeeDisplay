@@ -124,6 +124,7 @@ struct SpeedEngine {
   int64_t  ref_edge_us;     // timestamp of the latest pulse at previous update
   bool     moving;
   float    fast_kmh;
+  int64_t  fast_t_us;       // moment fast_kmh refers to (middle of its pulse window)
   int64_t  motion_start_us; // first pulse after standstill (launch timestamp)
   // OEM smooth estimator: 12-pulse moving average of pulse intervals
   uint32_t oem_hist[OEM_SLOTS];
@@ -144,6 +145,11 @@ struct PersistState {
   float    best_m;   // best 0-50 km/h
   float    best_i;   // best 0-30 mph
   int      lang;
+};
+
+struct AccSample {
+  int64_t t_us;
+  float   v_kmh;
 };
 
 enum TouchKind : uint8_t { TK_NONE = 0, TK_TAP, TK_REPEAT, TK_DRAG, TK_LONG };
@@ -356,9 +362,12 @@ static void speedEngineUpdate(const PulseSnapshot &s, int64_t now_us, float cal)
   const uint32_t dn = s.count - eng.ref_count;
   const bool was_moving = eng.moving;
 
+  // An average speed over a pulse window is the true speed at the window's
+  // middle (exact for constant acceleration), so fast_t_us is that midpoint.
   if (!have_edge || age > FAST_TIMEOUT_US) {
     eng.moving = false;
     eng.fast_kmh = 0.0f;
+    eng.fast_t_us = now_us;
   } else if (!was_moving) {
     if (dn > 0) {
       // First pulse(s) after standstill: a new motion starts at the first edge.
@@ -366,17 +375,22 @@ static void speedEngineUpdate(const PulseSnapshot &s, int64_t now_us, float cal)
       const bool iv_ok = dn >= 2 && s.interval_us > 0 && s.interval_us <= (uint32_t)FAST_TIMEOUT_US;
       eng.motion_start_us = s.last_edge_us - (iv_ok ? (int64_t)(dn - 1) * s.interval_us : 0);
       eng.fast_kmh = iv_ok ? K / (float)s.interval_us : 0.0f;
+      eng.fast_t_us = iv_ok ? s.last_edge_us - (int64_t)(s.interval_us / 2) : s.last_edge_us;
       if (iv_ok) oemPush(s.interval_us, dn - 1);
     }
   } else if (dn > 0) {
     const int64_t dt = s.last_edge_us - eng.ref_edge_us;
     if (dt > 0) {
       eng.fast_kmh = (float)dn * K / (float)dt;
+      eng.fast_t_us = eng.ref_edge_us + dt / 2;
       oemPush((uint32_t)(dt / dn), dn);  // one entry per pulse (sum is exact)
     }
   } else if (age > 0) {
     const float bound = K / (float)age;  // speed if a pulse arrived right now
-    if (bound < eng.fast_kmh) eng.fast_kmh = bound;
+    if (bound < eng.fast_kmh) {
+      eng.fast_kmh = bound;
+      eng.fast_t_us = now_us;
+    }
   }
   eng.ref_count = s.count;
   eng.ref_edge_us = s.last_edge_us;
@@ -592,6 +606,56 @@ void appPrepareForRestart() {
   saveAll("restart");
 }
 
+// Acceleration = least-squares slope of speed over the last ACC_WINDOW_US.
+// A regression over ~10 samples is far less noisy than a two-point difference.
+#define ACC_SAMPLES 24
+static const int64_t ACC_WINDOW_US = 300000;
+static const int64_t ACC_MIN_SPAN_US = 90000;
+static AccSample acc_buf[ACC_SAMPLES];
+static uint8_t acc_n = 0;
+
+static void accelReset() { acc_n = 0; }
+
+static void accelPush(int64_t t_us, float v_kmh) {
+  if (acc_n && t_us <= acc_buf[acc_n - 1].t_us) return;  // no new estimate this frame
+  if (acc_n == ACC_SAMPLES) {
+    memmove(acc_buf, acc_buf + 1, sizeof(AccSample) * (ACC_SAMPLES - 1));
+    acc_n--;
+  }
+  acc_buf[acc_n].t_us = t_us;
+  acc_buf[acc_n].v_kmh = v_kmh;
+  acc_n++;
+}
+
+// Line fit v(t) = v_mean + mps2 * (t - t_mean) over the window. Returns false
+// while there is too little data for a meaningful slope.
+static bool accelFit(int64_t now_us, float &mps2, int64_t &t_mean_us, float &v_mean_kmh) {
+  uint8_t first = 0;
+  while (first < acc_n && now_us - acc_buf[first].t_us > ACC_WINDOW_US) first++;
+  const int n = acc_n - first;
+  if (n < 3) return false;
+  const int64_t t0 = acc_buf[first].t_us;
+  if (acc_buf[acc_n - 1].t_us - t0 < ACC_MIN_SPAN_US) return false;
+  float st = 0, sv = 0, stt = 0, stv = 0;
+  for (uint8_t i = first; i < acc_n; i++) {
+    const float t = (float)(acc_buf[i].t_us - t0) * 1e-6f;  // s
+    const float v = acc_buf[i].v_kmh / 3.6f;                 // m/s
+    st += t; sv += v; stt += t * t; stv += t * v;
+  }
+  const float den = n * stt - st * st;
+  if (den <= 0.0f) return false;
+  mps2 = (n * stv - st * sv) / den;
+  t_mean_us = t0 + (int64_t)(st / n * 1e6f);
+  v_mean_kmh = sv / n * 3.6f;
+  return true;
+}
+
+static bool accelSlope(int64_t now_us, float &mps2) {
+  int64_t tm;
+  float vm;
+  return accelFit(now_us, mps2, tm, vm);
+}
+
 // ================================================================================
 // 7. RACE TIMER
 // ================================================================================
@@ -612,11 +676,29 @@ static int64_t interpCross(float v0, int64_t t0, float v1, int64_t t1, float thr
   return t0 + (int64_t)(f * (float)(t1 - t0));
 }
 
+// Crossing time from the line fitted over the last ACC_WINDOW_US (averages out
+// per-frame speed noise); falls back to two-sample interpolation. The result
+// is kept after `after_us` (the previous split) and near the triggering sample.
+static int64_t crossTime(float v0, int64_t t0, float v1, int64_t t1, float thr,
+                         int64_t now_us, int64_t after_us) {
+  float a, vm;
+  int64_t tm;
+  if (accelFit(now_us, a, tm, vm) && a > 0.3f) {
+    const int64_t tc = tm + (int64_t)((thr - vm) / 3.6f / a * 1e6f);
+    if (tc > after_us && tc >= t1 - 250000 && tc <= t1 + 100000) return tc;
+  }
+  const int64_t ti = interpCross(v0, t0, v1, t1, thr);
+  return ti > after_us ? ti : after_us + 1;
+}
+
 // v/t come from the unfiltered reciprocal estimator (t = pulse edge time), so
 // timing is not delayed by the display filter or quantized to 33 ms frames.
 static void raceTimerUpdate(float v, int64_t t_us, bool moving, int64_t start_us, int64_t now_us) {
   static float prev_v = 0.0f;
   static int64_t prev_t = 0;
+  static float first_v = 0.0f;       // first speed sample of the run
+  static int64_t first_t = 0;
+  static bool start_fixed = false;
 
   if (!moving) {
     if (accel_timer_state != ACCEL_READY) {
@@ -636,6 +718,8 @@ static void raceTimerUpdate(float v, int64_t t_us, bool moving, int64_t start_us
     raceClearResults();
     prev_v = 0.0f;
     prev_t = t_launch_us;
+    first_t = 0;
+    start_fixed = false;
   }
   if (accel_timer_state != ACCEL_RUNNING) {
     prev_v = v;
@@ -643,11 +727,30 @@ static void raceTimerUpdate(float v, int64_t t_us, bool moving, int64_t start_us
     return;
   }
 
+  // The first pulse only arrives after the wheel has rolled one pulse
+  // (2.4 cm): ~0.1 s after the real launch at 4 m/s2. Extrapolate the first two
+  // speed samples back to 0 km/h to find the true start (standstill launches
+  // only; bounded to what one pulse of travel can take).
+  if (!start_fixed && t_us > prev_t && v > 0.0f) {
+    if (first_t == 0) {
+      first_v = v;
+      first_t = t_us;
+    } else {
+      start_fixed = true;
+      if (first_v < 8.0f && v > first_v && t_us > first_t) {
+        const int64_t back = (int64_t)((float)(t_us - first_t) * first_v / (v - first_v));
+        int64_t t0 = first_t - back;
+        if (t0 < t_launch_us - 350000) t0 = t_launch_us - 350000;
+        if (t0 < t_launch_us) t_launch_us = t0;
+      }
+    }
+  }
+
   const float *thr = run_imperial ? RACE_THR_IMPERIAL : RACE_THR_METRIC;
 
   if (t_50_us == 0) {
     if (v >= thr[0]) {
-      t_50_us = interpCross(prev_v, prev_t, v, t_us, thr[0]);
+      t_50_us = crossTime(prev_v, prev_t, v, t_us, thr[0], now_us, t_launch_us);
       float r = (float)(t_50_us - t_launch_us) / 1000000.0f;
       last_0_50_time = r;
       current_0_50_time = r;
@@ -668,15 +771,15 @@ static void raceTimerUpdate(float v, int64_t t_us, bool moving, int64_t start_us
     }
   }
   if (accel_timer_state == ACCEL_RUNNING && t_50_us && !t_60_us && v >= thr[1]) {
-    t_60_us = interpCross(prev_v, prev_t, v, t_us, thr[1]);
+    t_60_us = crossTime(prev_v, prev_t, v, t_us, thr[1], now_us, t_50_us);
     split_50_60 = (float)(t_60_us - t_50_us) / 1000000.0f;
   }
   if (accel_timer_state == ACCEL_RUNNING && t_60_us && !t_70_us && v >= thr[2]) {
-    t_70_us = interpCross(prev_v, prev_t, v, t_us, thr[2]);
+    t_70_us = crossTime(prev_v, prev_t, v, t_us, thr[2], now_us, t_60_us);
     split_60_70 = (float)(t_70_us - t_60_us) / 1000000.0f;
   }
   if (accel_timer_state == ACCEL_RUNNING && t_70_us && !t_80_us && v >= thr[3]) {
-    t_80_us = interpCross(prev_v, prev_t, v, t_us, thr[3]);
+    t_80_us = crossTime(prev_v, prev_t, v, t_us, thr[3], now_us, t_70_us);
     split_70_80 = (float)(t_80_us - t_70_us) / 1000000.0f;
     time_0_80 = (float)(t_80_us - t_launch_us) / 1000000.0f;
     accel_timer_state = ACCEL_FINISHED;
@@ -747,7 +850,7 @@ static void updateTelemetry(uint32_t dt_ms) {
   } else {
     disp_raw = speed_filter_oem ? eng.oem_kmh : eng.fast_kmh;
     race_v = eng.fast_kmh;
-    race_t = eng.ref_edge_us;
+    race_t = eng.fast_t_us;
     race_moving = eng.moving;
     race_start = eng.motion_start_us;
   }
@@ -769,20 +872,34 @@ static void updateTelemetry(uint32_t dt_ms) {
   }
   bike_speed_kmh = filtered;
 
-  // Acceleration / G-force (forward pull only), 50 ms cadence
-  static float last_accel_speed = 0.0f;
+  // Acceleration / G-force (forward pull only), 50 ms cadence.
+  // Uses the unfiltered pulse speed with the time each estimate refers to (the
+  // display filter would add lag, and much more in OEM mode). The launch is
+  // anchored at 0 km/h at the first pulse, so the first reading after
+  // standstill is a real pull, not a jump from 0.
+  static bool acc_moving = false;
   static uint32_t last_accel_ms = 0;
   static float smoothed_mps2 = 0.0f;
-  const uint32_t dt_acc = g_frame_ms - last_accel_ms;
-  if (dt_acc >= 50) {
-    float raw_accel = 0.0f;
-    if (dt_acc < 1000) raw_accel = ((filtered - last_accel_speed) / 3.6f) / (dt_acc / 1000.0f);
-    if (raw_accel < 0.0f) raw_accel = 0.0f;
-    smoothed_mps2 = 0.30f * raw_accel + 0.70f * smoothed_mps2;
-    current_accel_g = smoothed_mps2 / 9.80665f;
-    current_accel_pct = (int)lroundf(constrain(smoothed_mps2 / 4.5f, 0.0f, 1.0f) * 100.0f);
-    last_accel_speed = filtered;
+  const float acc_v = demo_mode ? demo_speed : eng.fast_kmh;
+  const int64_t acc_t = demo_mode ? now_us : eng.fast_t_us;
+  if (race_moving && !acc_moving) {
+    accelReset();
+    accelPush((race_start > 0 && race_start <= acc_t) ? race_start : acc_t, 0.0f);
+  }
+  acc_moving = race_moving;
+  if (race_moving) accelPush(acc_t, acc_v);
+  else accelReset();
+
+  if (g_frame_ms - last_accel_ms >= 50) {
     last_accel_ms = g_frame_ms;
+    float slope = 0.0f;
+    if (!race_moving || !accelSlope(now_us, slope)) slope = 0.0f;
+    // Smooth the SIGNED value and clamp only for display: clamping first would
+    // turn speed noise at a steady speed into a constant fake pull.
+    smoothed_mps2 = 0.30f * slope + 0.70f * smoothed_mps2;
+    const float pull = smoothed_mps2 > 0.0f ? smoothed_mps2 : 0.0f;
+    current_accel_g = pull / 9.80665f;
+    current_accel_pct = (int)lroundf(constrain(pull / 4.5f, 0.0f, 1.0f) * 100.0f);  // 4.5 m/s2 (0.46 G) = 100%
   }
 
   if (filtered > session_max_speed) session_max_speed = filtered;
@@ -993,14 +1110,14 @@ static void fireLong(uint8_t t) {
       g_trip_km = 0.0;
       portEXIT_CRITICAL(&g_tel_mux);
       save_requested = true;
-      trip_reset_flash_until = g_frame_ms + 1500;
+      trip_reset_flash_until = (g_frame_ms + 1500) | 1;
       break;
     case TGT_ODO_RESET:
       portENTER_CRITICAL(&g_tel_mux);
       g_odo_km = 0.0;
       portEXIT_CRITICAL(&g_tel_mux);
       save_requested = true;
-      odo_reset_flash_until = g_frame_ms + 1500;
+      odo_reset_flash_until = (g_frame_ms + 1500) | 1;
       break;
     case TGT_DEMO:
       demo_mode = !demo_mode;
@@ -1042,6 +1159,7 @@ static void handleTouch(bool blocked) {
       if (!T.down) { memset(&T, 0, sizeof(T)); T.down = true; }
       T.target = TGT_NONE;
       T.cancelled = true;
+      T.no_swipe = true;  // x0/y0 are stale here: no swipe once unblocked
     } else {
       T.down = false;
     }
@@ -1335,9 +1453,9 @@ static void drawDashBottom(double odo, double trip) {
   const int vend = vx + uiTextW(v, &FreeSansBold12pt7b);
   const char *hint;
   uint16_t hcol;
-  if ((int32_t)(trip_reset_flash_until - g_frame_ms) > 0) { hint = "RESET!"; hcol = P->green; }
-  else if (hold > 0.0f) { hint = TR("HOLD..", "TARTSD.."); hcol = P->red; }
-  else { hint = TR("HOLD", "TARTSD"); hcol = P->text_faint; }
+  if (trip_reset_flash_until && (int32_t)(trip_reset_flash_until - g_frame_ms) > 0) { hint = "RESET!"; hcol = P->green; }
+  else if (hold > 0.0f) { hint = TR("HOLD..", "TART.."); hcol = P->red; }
+  else { hint = TR("HOLD", "TART"); hcol = P->text_faint; }
   if (vend + 8 + uiTextW(hint, &FreeSans9pt7b) < R_TRIP.right() - 10)
     uiTextMid(hint, R_TRIP.right() - 10, cy, &FreeSans9pt7b, hcol, AL_RIGHT);
 
@@ -1606,7 +1724,7 @@ static void drawSettingsOdo(double odo) {
 
   uiButton(R_ODO_MINUS, "-10 KM", &FreeSansBold12pt7b, uiPressed(TGT_ODO_MINUS), P->surface_hi, P->text);
   uiButton(R_ODO_PLUS, "+10 KM", &FreeSansBold12pt7b, uiPressed(TGT_ODO_PLUS), P->surface_hi, P->text);
-  uiTextMid(TR("HOLD = FAST", "TARTVA GYORS"), 240, R_ODO_MINUS.cy(), &FreeSans9pt7b, P->text_faint, AL_CENTER);
+  uiTextMid(TR("HOLD = FAST", "TART = GYORS"), 240, R_ODO_MINUS.cy(), &FreeSans9pt7b, P->text_faint, AL_CENTER);
 
   // Reset: hold 2 s (progress fill), no single-tap wipe
   const float hold = uiHold(TGT_ODO_RESET);
@@ -1614,7 +1732,7 @@ static void drawSettingsOdo(double odo) {
   if (hold > 0.0f) uiRRect(R_ODO_RESET.x, R_ODO_RESET.y, (int)(R_ODO_RESET.w * hold), R_ODO_RESET.h, 10, P->red);
   uiRRectLine(R_ODO_RESET, 10, P->red);
   const char *lbl;
-  if ((int32_t)(odo_reset_flash_until - g_frame_ms) > 0) lbl = TR("ODOMETER RESET", "ODO NULLAZVA");
+  if (odo_reset_flash_until && (int32_t)(odo_reset_flash_until - g_frame_ms) > 0) lbl = TR("ODOMETER RESET", "ODO NULLAZVA");
   else lbl = TR("HOLD 2 s TO RESET ODO", "TARTSD 2 MP: ODO NULLAZAS");
   uiTextMid(lbl, 240, R_ODO_RESET.cy(), &FreeSansBold9pt7b, hold > 0.5f ? C565(255, 255, 255) : (theme_light ? P->red : P->text), AL_CENTER);
 }
@@ -1755,8 +1873,10 @@ static void drawSettingsWifi() {
   const int lx = R_WIFI_INFO.x + 12, vx = R_WIFI_INFO.x + 82, vw = R_WIFI_INFO.right() - 10 - vx;
   char v[80];
   uiText("WIFI", lx, 162, &FreeSans9pt7b, P->text_dim);
-  uiFit(g_ota.ssid, vw, &FreeSansBold9pt7b, v, sizeof(v));
-  uiText(v, vx, 162, &FreeSansBold9pt7b, P->text);
+  // "WheelieAssist-XXXX" is 168..180 px bold (> vw = 172) but <= 171 px regular
+  const GFXfont *sf = uiTextW(g_ota.ssid, &FreeSansBold9pt7b) <= vw ? &FreeSansBold9pt7b : &FreeSans9pt7b;
+  uiFit(g_ota.ssid, vw, sf, v, sizeof(v));
+  uiText(v, vx, 162, sf, P->text);
   uiText(TR("PASS", "JELSZO"), lx, 188, &FreeSans9pt7b, P->text_dim);
   uiFit(g_ota.password[0] ? g_ota.password : "-", vw, &FreeSansBold9pt7b, v, sizeof(v));
   uiText(v, vx, 188, &FreeSansBold9pt7b, P->text);

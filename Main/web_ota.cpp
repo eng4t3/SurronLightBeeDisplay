@@ -38,7 +38,7 @@
 static const IPAddress kApIp(192, 168, 4, 1);
 static const IPAddress kApMask(255, 255, 255, 0);
 static const char *const kApIpStr = "192.168.4.1";
-static const char *const kMdnsHost = "wheelie";  // http://wheelie.local
+static const char *const kMdnsHost = "lightbee";  // http://lightbee.local
 static const char *const kNvsNs = "webota";
 static const char *const kNvsPassKey = "pass";
 
@@ -177,7 +177,7 @@ static bool isHexMd5(const String &s) {
 static void makeCredentials(char *ssid, size_t ssidCap, char *pass, size_t passCap) {
   uint8_t mac[6] = {0};
   esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
-  snprintf(ssid, ssidCap, "WheelieAssist-%02X%02X", mac[4], mac[5]);
+  snprintf(ssid, ssidCap, "LightBeeDisplay-%02X%02X", mac[4], mac[5]);
 
   Preferences prefs;
   pass[0] = 0;
@@ -228,7 +228,7 @@ static void sendJsonError(int code, const char *msg) {
 // same-origin XHR/fetch (anything else needs a CORS preflight we never
 // answer), so a random page can't trigger an update or reboot.
 static bool requireAppHeader() {
-  if (s_server->header("X-Requested-With") == "WheelieAssist") return true;
+  if (s_server->header("X-Requested-With") == "LightBee Display") return true;
   sendJsonError(403, "Missing request header");
   return false;
 }
@@ -244,7 +244,7 @@ static bool hostIsUs() {
   int colon = h.indexOf(':');
   if (colon >= 0) h = h.substring(0, colon);
   h.toLowerCase();
-  return h.length() == 0 || h == kApIpStr || h == "wheelie.local" || h == "wheelie";
+  return h.length() == 0 || h == kApIpStr || h == "lightbee.local" || h == "lightbee";
 }
 
 // ---------------------------------------------------------------------------
@@ -396,7 +396,7 @@ static void onUploadStart(WebServer &srv, HTTPUpload &) {
     strlcpy(s_up.err, "Update already installed; restarting.", sizeof(s_up.err));
     return;
   }
-  if (srv.header("X-Requested-With") != "WheelieAssist") {
+  if (srv.header("X-Requested-With") != "LightBee Display") {
     s_up.failed = true;
     s_up.httpCode = 403;
     strlcpy(s_up.err, "Missing request header", sizeof(s_up.err));

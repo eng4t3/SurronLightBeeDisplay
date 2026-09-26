@@ -1,4 +1,4 @@
-// ui.h - the WheelieAssist user interface (design/DESIGN_SPEC.md).
+// ui.h - the LightBee Display user interface (design/DESIGN_SPEC.md).
 //
 // Main.ino owns all application state. Once per frame it fills a ui::View
 // from its telemetry/settings and calls ui::frame(view); the UI draws the

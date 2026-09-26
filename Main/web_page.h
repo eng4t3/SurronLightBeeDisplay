@@ -1,7 +1,7 @@
 // Single-page web UI for the WiFi firmware updater (served by web_ota.cpp).
 // Fully self-contained: the phone has no internet while it is on the hotspot.
-#ifndef WHEELIE_WEB_PAGE_H
-#define WHEELIE_WEB_PAGE_H
+#ifndef LBD_WEB_PAGE_H
+#define LBD_WEB_PAGE_H
 
 #include <Arduino.h>
 
@@ -10,7 +10,7 @@ static const char WEB_PAGE[] PROGMEM = R"WAPAGE(<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" content="#0a0f1c">
-<title>WheelieAssist &middot; Update</title>
+<title>LightBee Display &middot; Update</title>
 <link rel="icon" href="data:,">
 <style>
 :root{--bg:#0a0f1c;--card:rgba(15,23,42,.78);--tile:rgba(148,163,184,.06);--line:rgba(148,163,184,.14);--tx:#e7edf7;--mu:#8b9ab4;--cy:#06b6d4;--cy2:#22d3ee;--am:#f59e0b;--rd:#ef4444;--gn:#10b981;--sh:0 1px 0 rgba(255,255,255,.04) inset,0 20px 40px -24px rgba(0,0,0,.8);--g1:rgba(6,182,212,.18);--g2:rgba(245,158,11,.08);color-scheme:dark}
@@ -111,7 +111,7 @@ footer{text-align:center;color:var(--mu);font-size:12px;padding:6px 0 0}
 </style></head><body><div class="wrap">
 <header>
 <div class="brand"><div class="logo" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></div>
-<div><h1>WheelieAssist</h1><p class="sub">Dashboard firmware</p></div></div>
+<div><h1>LightBee Display</h1><p class="sub">Dashboard firmware</p></div></div>
 <div class="hr"><span class="badge" id="ver" title="Installed firmware">v&hellip;</span><span class="dot" id="dot" role="img" aria-label="Connecting"></span></div>
 </header>
 <main>
@@ -170,7 +170,7 @@ footer{text-align:center;color:var(--mu);font-size:12px;padding:6px 0 0}
 <button class="btn dan" id="rb" type="button">Reboot dashboard</button>
 </section>
 </main>
-<footer>WheelieAssist &middot; 192.168.4.1</footer>
+<footer>LightBee Display &middot; 192.168.4.1</footer>
 </div>
 <script>
 (function(){
@@ -181,7 +181,7 @@ function fmtB(n){return n>=1048576?(n/1048576).toFixed(2)+' MB':Math.round(n/102
 function fmtT(s){s=Math.max(0,Math.round(s));var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return(h?h+':'+(m<10?'0':''):'')+m+':'+(x<10?'0':'')+x}
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function api(url,o,to){o=o||{};return new Promise(function(res,rej){var x=new XMLHttpRequest();x.open(o.m||'GET',url);x.timeout=to||4000;
-if(o.m==='POST')x.setRequestHeader('X-Requested-With','WheelieAssist');
+if(o.m==='POST')x.setRequestHeader('X-Requested-With','LightBee Display');
 x.onload=function(){var j=null;try{j=JSON.parse(x.responseText)}catch(e){}if(x.status>=200&&x.status<300)res(j||{});else rej(new Error(j&&j.error||'Error '+x.status))};
 x.onerror=x.ontimeout=function(){rej(new Error('offline'))};x.send(o.b||null)})}
 function dot(s){var d=$('dot');d.className='dot '+s;d.setAttribute('aria-label',s==='ok'?'Connected':s==='bad'?'Disconnected':'Connecting')}
@@ -223,7 +223,7 @@ return readBuf(f.size<=max+65536?f:f.slice(0,64)).then(function(u){
 if(u[0]!==0xE9)add('bad','Not an ESP32 firmware image. Pick the .bin from the release.');
 else{var id=u[12]|u[13]<<8;
 if(id!==9)add('bad','Built for '+(CHIPS[id]||'another chip')+'. This dashboard needs an ESP32-S3 build.');
-else if(!(u[32]===0x32&&u[33]===0x54&&u[34]===0xCD&&u[35]===0xAB))add('bad','This looks like the -full.bin USB image (bootloader + app). Upload the plain WheelieAssist-x.y.z.bin instead.');
+else if(!(u[32]===0x32&&u[33]===0x54&&u[34]===0xCD&&u[35]===0xAB))add('bad','This looks like the -full.bin USB image (bootloader + app). Upload the plain LightBeeDisplay-x.y.z.bin instead.');
 else add('ok','ESP32-S3 application image')}
 if(f.size>max)add('bad','Too big: '+fmtB(f.size)+', the update slot holds '+fmtB(max)+'.');
 else if(f.size<65536)add('bad','File is too small to be dashboard firmware.');
@@ -232,7 +232,7 @@ var t=bad?null:findTag(u);newVer='';
 if(t&&t.length>=2){newVer=t[1];var cur=info&&info.version;
 if(cur&&cur===newVer)add('warn',t[0]+' v'+newVer+' \u00b7 same version as installed');
 else add('ok',t[0]+' v'+newVer+(t[2]?' \u00b7 built '+t[2]:'')+(cur?' (installed: v'+cur+')':''))}
-else if(!bad)add('warn','No WheelieAssist version tag found. Make sure this is the right firmware.');
+else if(!bad)add('warn','No LightBee Display version tag found. Make sure this is the right firmware.');
 $('checks').innerHTML=L.join('');fileOk=!bad;upd()}).catch(function(){$('checks').innerHTML='<li class="bad">Could not read the file.</li>';fileOk=false;upd()})}
 function setFile(f){file=f||null;fileOk=false;msg();show('finfo',!!f);show('drop',!f);
 if(!f){$('file').value='';$('checks').innerHTML='';upd();return}
@@ -261,7 +261,7 @@ api('/api/precheck?size='+file.size).then(function(){
 var x=new XMLHttpRequest(),fd=new FormData(),t0=Date.now(),lt=t0,lb=0,spd=0;
 fd.append('firmware',file,file.name);
 x.open('POST','/update?size='+file.size+(md5?'&md5='+md5:''));
-x.setRequestHeader('X-Requested-With','WheelieAssist');x.setRequestHeader('X-FW-Size',String(file.size));
+x.setRequestHeader('X-Requested-With','LightBee Display');x.setRequestHeader('X-FW-Size',String(file.size));
 var stg=newVer?'Installing v'+newVer:'Uploading';setP(0,stg+'\u2026');
 x.upload.onprogress=function(e){if(!e.lengthComputable)return;var now=Date.now(),dt=(now-lt)/1000;
 if(dt>=0.4){var s=(e.loaded-lb)/dt;spd=spd?spd*0.7+s*0.3:s;lt=now;lb=e.loaded;

@@ -1,8 +1,8 @@
 // Hooks the dashboard (Main.ino) provides to other modules such as the web
 // interface. Implemented in Main.ino. All functions are safe to call from any
 // task.
-#ifndef WHEELIE_APP_BRIDGE_H
-#define WHEELIE_APP_BRIDGE_H
+#ifndef LBD_APP_BRIDGE_H
+#define LBD_APP_BRIDGE_H
 
 #include <Arduino.h>
 

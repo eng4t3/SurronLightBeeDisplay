@@ -1,6 +1,6 @@
 /*
   ================================================================================
-  WHEELIE ASSIST / EMOTO-DASH-PRO: Sur-Ron speed & acceleration telemetry cluster
+  LIGHTBEE DISPLAY: Sur-Ron speed & acceleration telemetry cluster
   Target: Guition JC3248W535 (ESP32-S3, 16MB flash, 8MB OPI PSRAM,
           480x320 landscape QSPI IPS AXS15231B + capacitive touch)
   ================================================================================
@@ -1270,7 +1270,7 @@ static void buildView(ui::View &v) {
   if (g_mock.wifi && v.ota.state == WEBOTA_OFF) {
     v.ota.state = WEBOTA_READY;
     v.ota.clients = 1;
-    strlcpy(v.ota.ssid, "WheelieAssist-1A2B", sizeof(v.ota.ssid));
+    strlcpy(v.ota.ssid, "LightBeeDisplay-1A2B", sizeof(v.ota.ssid));
     strlcpy(v.ota.password, "k7m2qx9vtp", sizeof(v.ota.password));
     strlcpy(v.ota.ip, "192.168.4.1", sizeof(v.ota.ip));
   }

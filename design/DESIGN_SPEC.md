@@ -1,4 +1,4 @@
-# WheelieAssist UI 5 — Design Spec (implementation contract)
+# LightBee Display UI 5 — Design Spec (implementation contract)
 
 Target: Guition JC3248W535, 3.5" IPS, **480×320 landscape, RGB565**, capacitive touch, 30 fps full-frame redraw.
 Source of truth: `design/mockups.html` (Canvas2D). Every number in the generated tables below comes out of the
@@ -607,7 +607,7 @@ for 1.2 s, short 60 ms vibration-free "flash": card stroke `green` for 300 ms. H
 | `wifi.qr` | QR modules (rects, no AA) | x=132 y=136 29×29 modules × 4px = 116px | `qr_fg` |  | payload WIFI:T:WPA;S:<ssid>;P:<pass>;; — version 3, ECC L, byte mode (46 B) |
 | `wifi.qrHint` | text | center x=190 base=296 | `text_dim` | `SMALL` “Scan to join” |  |
 | `wifi.row0.label` | text | left x=274 base=144 | `text_dim` | `LABEL` “NETWORK” |  |
-| `wifi.row0.value` | text | left x=274 base=166 | `text_hi` | `BODYB` “WheelieAssist-1A2B” |  |
+| `wifi.row0.value` | text | left x=274 base=166 | `text_hi` | `BODYB` “LightBeeDisplay-1A2B” |  |
 | `wifi.row1.label` | text | left x=274 base=188 | `text_dim` | `LABEL` “PASSWORD” |  |
 | `wifi.row1.value` | text | left x=274 base=210 | `text_hi` | `BODYB` “k7m2qx9vtp” |  |
 | `wifi.row2.label` | text | left x=274 base=232 | `text_dim` | `LABEL` “ADDRESS” |  |
@@ -720,7 +720,7 @@ Percentage and bar fill are eased toward the target (τ = 120 ms) so they never 
 | `boot.logo` | bitmap 320×167 (0x0000 = transparent) | x=80 y=52 | logo_bitmap |  | fade in 0→100 % over 400 ms, ease-out |
 | `boot.lineTrack` | capsule (h) | x=180 y=236 w=120 th=3 | `track` |  |  |
 | `boot.line` | capsule (h) | x=200 y=236 w=80 th=3 | `accent` |  | loader: grows from centre to 120 px while booting |
-| `boot.version` | text | center x=240 base=276 | `text_dim` | `SMALL` “WheelieAssist v4.1.1” |  |
+| `boot.version` | text | center x=240 base=276 | `text_dim` | `SMALL` “LightBee Display v4.1.1” |  |
 <!-- /GEN:screen_boot -->
 Sequence (≈1.2 s total, same as today): 0–400 ms logo alpha 0→1 (`easeOutCubic`); 200–1100 ms loader capsule grows
 symmetrically from the centre 0→120 px; version text fades in at 300 ms. Hand-over: dashboard fades in over 200 ms and

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Local build helper for WheelieAssist (mirrors .github/workflows/release.yml).
+    Local build helper for LightBee Display (mirrors .github/workflows/release.yml).
 
 .DESCRIPTION
     Compiles Main/Main.ino with arduino-cli using the same FQBN as CI, exports

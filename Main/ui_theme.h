@@ -1,4 +1,4 @@
-// ui_theme.h - design tokens of the WheelieAssist UI (design/DESIGN_SPEC.md §2).
+// ui_theme.h - design tokens of the LightBee Display UI (design/DESIGN_SPEC.md §2).
 //
 // Every colour is an exact RGB565 value, so the mockup hex and the device
 // colour are identical (8-bit channels are bit-replicated in the mockups).

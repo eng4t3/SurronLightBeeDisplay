@@ -1,7 +1,7 @@
 // WiFi access point + web interface for manual firmware updates (OTA).
 // Implemented in web_ota.cpp. Everything here is safe to call from any task.
-#ifndef WHEELIE_WEB_OTA_H
-#define WHEELIE_WEB_OTA_H
+#ifndef LBD_WEB_OTA_H
+#define LBD_WEB_OTA_H
 
 #include <Arduino.h>
 

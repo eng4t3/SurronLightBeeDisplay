@@ -1,4 +1,4 @@
-# WheelieAssist partition table (16 MB flash, two OTA app slots).
+# LightBee Display partition table (16 MB flash, two OTA app slots).
 # Identical to the core's "16M Flash (3MB APP/9.9MB FATFS)" scheme so that
 # NVS stays at 0x9000 and the stored odometer/settings survive the switch.
 # The Arduino ESP32 core automatically uses a partitions.csv found in the

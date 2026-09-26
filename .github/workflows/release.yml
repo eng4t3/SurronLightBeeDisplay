@@ -1,13 +1,13 @@
 name: Build and Release Firmware
 
-# Builds the WheelieAssist ESP32-S3 sketch and, for pushed "vX.Y.Z" tags,
+# Builds the LightBee Display ESP32-S3 sketch and, for pushed "vX.Y.Z" tags,
 # publishes a GitHub Release with the files riders need:
-#   WheelieAssist-<version>.bin       -> upload via the on-device web OTA updater
-#   WheelieAssist-<version>-full.bin  -> full image (bootloader+partitions+app),
+#   LightBeeDisplay-<version>.bin       -> upload via the on-device web OTA updater
+#   LightBeeDisplay-<version>-full.bin  -> full image (bootloader+partitions+app),
 #                                         flash at 0x0 over USB for first-time
 #                                         installs, partition-table changes, or
 #                                         recovering a device that won't boot
-#   WheelieAssist-<version>.bin.md5, SHA256SUMS.txt -> integrity checks
+#   LightBeeDisplay-<version>.bin.md5, SHA256SUMS.txt -> integrity checks
 #
 # A manual run (workflow_dispatch) does the same build but skips the
 # tag/version check and uploads the files as a workflow artifact instead of
@@ -120,8 +120,8 @@ jobs:
         run: |
           set -e
           VERSION="${{ steps.fw.outputs.version }}"
-          OTA_NAME="WheelieAssist-${VERSION}.bin"
-          FULL_NAME="WheelieAssist-${VERSION}-full.bin"
+          OTA_NAME="LightBeeDisplay-${VERSION}.bin"
+          FULL_NAME="LightBeeDisplay-${VERSION}-full.bin"
 
           # arduino-cli names exported binaries after the sketch's .ino file
           # (Main/Main.ino -> Main.ino.*), not the containing folder or FQBN.
@@ -155,25 +155,25 @@ jobs:
         if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
-          name: WheelieAssist ${{ steps.package.outputs.version }}
+          name: LightBee Display ${{ steps.package.outputs.version }}
           files: |
             ${{ steps.package.outputs.ota_path }}
             ${{ steps.package.outputs.full_path }}
             ${{ steps.package.outputs.md5_path }}
             ${{ steps.package.outputs.sha_path }}
           body: |
-            ## WheelieAssist ${{ steps.package.outputs.version }}
+            ## LightBee Display ${{ steps.package.outputs.version }}
 
             **Updating over WiFi (normal update, most riders):**
-            Download `WheelieAssist-${{ steps.package.outputs.version }}.bin`
+            Download `LightBeeDisplay-${{ steps.package.outputs.version }}.bin`
             to your phone *before* joining the dashboard's hotspot (the
             hotspot has no internet access). Then on the dashboard: Settings
             -> WIFI tab -> turn on the update hotspot -> scan the QR code (or
-            join `WheelieAssist-XXXX` manually) -> open `http://192.168.4.1`
+            join `LightBeeDisplay-XXXX` manually) -> open `http://192.168.4.1`
             -> choose the file -> Install. The bike must be stationary.
 
             **USB recovery flash:**
-            `WheelieAssist-${{ steps.package.outputs.version }}-full.bin` is the
+            `LightBeeDisplay-${{ steps.package.outputs.version }}-full.bin` is the
             full image (bootloader + partitions + app), flashed at offset `0x0`
             with esptool. **It erases the settings/odometer area (NVS)** —
             only use it to recover a device that won't boot. For a normal
@@ -188,7 +188,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: WheelieAssist-${{ steps.package.outputs.version }}
+          name: LightBeeDisplay-${{ steps.package.outputs.version }}
           path: |
             ${{ steps.package.outputs.ota_path }}
             ${{ steps.package.outputs.full_path }}

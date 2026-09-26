@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>WheelieAssist UI Mockups</title>
+<title>LightBee Display UI Mockups</title>
 <style>
 @font-face { font-family: 'BSC'; src: url('../tools/fonts/BarlowSemiCondensed-Medium.ttf') format('truetype'); font-weight: 500; }
 @font-face { font-family: 'BSC'; src: url('../tools/fonts/BarlowSemiCondensed-SemiBold.ttf') format('truetype'); font-weight: 600; }
@@ -38,7 +38,7 @@ figcaption code { color: var(--dim); font: 500 13px ui-monospace, Consolas, mono
 </head>
 <body>
 <header>
-  <h1>WheelieAssist <span>UI</span> · 480×320 mockups</h1>
+  <h1>LightBee Display <span>UI</span> · 480×320 mockups</h1>
   <label><input type="checkbox" id="optQ" checked> RGB565 preview</label>
   <label><input type="checkbox" id="optT"> touch targets</label>
   <label><input type="checkbox" id="opt1x"> 1:1 size</label>
@@ -51,7 +51,7 @@ figcaption code { color: var(--dim); font: 500 13px ui-monospace, Consolas, mono
 <script>
 'use strict';
 /* =====================================================================================
-   WheelieAssist UI — design mockups.
+   LightBee Display UI — design mockups.
    Everything is drawn with primitives that map 1:1 to the AA engine:
      rrect / rrectStroke / rrectVGrad / circle / ring / arc (+angle gradient, round caps)
      capsule / poly (convex) / glow (radial falloff) / vignette / text (4-bit AA, tracking,
@@ -868,7 +868,7 @@ function setWifi(o) {
     g.fillStyle = C('qr_fg'); for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) if (QR[y][x] === '1') g.fillRect(qx + pad + x * m, qy + pad + y * m, m, m);
     rec('wifi.qr', { p: 'QR modules (rects, no AA)', g: `x=${qx + pad} y=${qy + pad} ${n}×${n} modules × ${m}px = ${n * m}px`, c: cn('qr_fg'), n: 'payload WIFI:T:WPA;S:<ssid>;P:<pass>;; — version 3, ECC L, byte mode (46 B)' });
     text('wifi.qrHint', tr('Scan to join', 'Olvasd be'), 'SMALL', qx + (n * m + 2 * pad) / 2, 296, 'center', 'text_dim');
-    const ix = qx + n * m + 2 * pad + 18, rows = [[tr('NETWORK', 'HÁLÓZAT'), 'WheelieAssist-1A2B', 'text_hi'], [tr('PASSWORD', 'JELSZÓ'), 'k7m2qx9vtp', 'text_hi'], [tr('ADDRESS', 'CÍM'), 'http://192.168.4.1', 'accent']];
+    const ix = qx + n * m + 2 * pad + 18, rows = [[tr('NETWORK', 'HÁLÓZAT'), 'LightBeeDisplay-1A2B', 'text_hi'], [tr('PASSWORD', 'JELSZÓ'), 'k7m2qx9vtp', 'text_hi'], [tr('ADDRESS', 'CÍM'), 'http://192.168.4.1', 'accent']];
     rows.forEach(([l, v, c], i) => {
       const y = 144 + i * 44;
       text('wifi.row' + i + '.label', l, 'LABEL', ix, y, 'left', 'text_dim');
@@ -936,7 +936,7 @@ function scrBoot() {
   rec('boot.logo', { p: 'bitmap 320×167 (0x0000 = transparent)', g: 'x=80 y=52', c: 'logo_bitmap', n: 'fade in 0→100 % over 400 ms, ease-out' });
   hcapsule('boot.lineTrack', 180, 236, 120, 3, 'track');
   hcapsule('boot.line', 180 + 60 - 40, 236, 80, 3, 'accent', 1, 'loader: grows from centre to 120 px while booting');
-  text('boot.version', 'WheelieAssist v4.1.1', 'SMALL', 240, 276, 'center', 'text_dim');
+  text('boot.version', 'LightBee Display v4.1.1', 'SMALL', 240, 276, 'center', 'text_dim');
   T = saveT;
 }
 

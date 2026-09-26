@@ -16,8 +16,10 @@
     - NVS / Preferences      guarded by g_nvs_mutex (FreeRTOS mutex)
     - other telemetry        single 32-bit values (atomic on Xtensa)
 
-  Drawing: everything goes straight to the Arduino_Canvas framebuffer in
-  rotation 1 (landscape) via ui_gfx.h, then display.flush() once per frame.
+  Drawing: once per frame the UI task fills a ui::View from the telemetry and
+  settings below and ui::frame() draws the whole frame with the anti-aliased
+  gfx engine (ui_*.cpp, see ui.h). lcd::present() hands the finished frame to
+  a flush task on core 0 (double buffered) while the next one is drawn.
 */
 
 #include <Arduino.h>
@@ -30,12 +32,13 @@
 #include <freertos/semphr.h>
 #include <JC3248W535EN_Touch_LCD.h>
 
-#include "ui_gfx.h"      // palette, primitives, fonts (incl. big_font.h)
-#include "logo.h"
 #include "version.h"
 #include "web_ota.h"
 #include "app_bridge.h"
-#include <qrcode_helper.h>  // ricmoo QRCode (ships with the JC3248W535EN library)
+#include "gfx.h"            // anti-aliased engine
+#include "ui.h"             // user interface (view state, drawing, hit testing)
+#include "debug_console.h"  // serial console: screenshots, remote control
+#include "lcd_flush.h"      // async double-buffered panel flush
 
 // ================================================================================
 // 1. PIN DEFINITIONS & CONSTANTS
@@ -76,19 +79,10 @@ const float GAUGE_MAX_MPH = 50.0f;
 
 #define NVS_NS "surron_dash"
 
-#define TR(en, hu) ((current_lang == LANG_HU) ? (hu) : (en))
-
 // ================================================================================
 // 2. TYPES (all declared before the first function so Arduino's generated
 //    prototypes can reference them)
 // ================================================================================
-
-enum GaugeSkin : uint8_t {
-  SKIN_PRO_ARC = 0,        // Segmented 26-LED arc
-  SKIN_CYBER_HORIZON = 1,  // Continuous gradient halo
-  SKIN_ANALOG_SPORT = 2,   // Sport needle dial
-  SKIN_F1_RACE = 3         // F1 steering-wheel cockpit
-};
 
 enum ScreenState : uint8_t {
   SCREEN_BOOT = 0,
@@ -158,31 +152,20 @@ struct AccSample {
 
 enum TouchKind : uint8_t { TK_NONE = 0, TK_TAP, TK_REPEAT, TK_DRAG, TK_LONG };
 
-enum TouchTarget : uint8_t {
-  TGT_NONE = 0,
-  TGT_TAB0, TGT_TAB1, TGT_TAB2, TGT_TAB3, TGT_TAB4, TGT_TAB5,
-  TGT_BRIGHT, TGT_UNITS, TGT_THEME,
-  TGT_SKIN0, TGT_SKIN1, TGT_SKIN2, TGT_SKIN3,
-  TGT_CAL_MINUS, TGT_CAL_PLUS, TGT_FILTER_FAST, TGT_FILTER_OEM,
-  TGT_ODO_MINUS, TGT_ODO_PLUS, TGT_ODO_RESET,
-  TGT_LANG_EN, TGT_LANG_HU,
-  TGT_WIFI_TOGGLE,
-  TGT_TRIP_RESET, TGT_MAX_RESET,
-  TGT_RACE_RESET,
-  TGT_DEMO
-};
-
+// Touch targets are ui::Target (hit testing lives with the layout in ui_*.cpp).
 struct TouchState {
   bool     down;
   int16_t  x0, y0, x, y;
   uint32_t t0;
   uint32_t last_repeat;
-  uint8_t  target;
-  uint8_t  kind;
-  bool     no_swipe;
-  bool     swiped;
+  uint8_t  target;     // ui::Target under the finger at touch-down
+  uint8_t  kind;       // TouchKind
+  bool     no_swipe;   // drag / repeat targets and overlays never swipe
+  bool     sliding;    // horizontal page drag in progress
   bool     cancelled;
   bool     fired;
+  float    vx;         // smoothed horizontal finger velocity (px/ms) for flings
+  uint32_t last_ms;
 };
 
 // ================================================================================
@@ -199,7 +182,7 @@ static double g_trip_km = 0.0;
 volatile uint32_t ride_seconds = 0;  // accumulated time moving > 1 km/h
 
 // --- Settings ---
-volatile GaugeSkin current_skin = SKIN_PRO_ARC;
+volatile ui::Skin current_skin = ui::SKIN_HALO;  // NVS "skin" 0..3: HALO, PURE, CHRONO, APEX
 volatile int screen_brightness = 255;
 volatile bool imperial_mode = false;
 volatile bool theme_light = false;
@@ -247,6 +230,9 @@ volatile float time_0_80 = 0.0f;
 
 // 0-50 / 50-60 / 60-70 / 70-80 km/h   and   0-30 / 30-40 / 40-50 / 50-60 mph
 static const float RACE_THR_METRIC[4]   = {50.0f, 60.0f, 70.0f, 80.0f};
+// A 0-50 km/h (0-30 mph) run faster than this would need > ~0.95 G average:
+// impossible on a Light Bee, so it comes from noise pulses and is never a record.
+static const float RACE_MIN_PLAUSIBLE_S = 1.5f;
 static const float RACE_THR_IMPERIAL[4] = {48.2803f, 64.3738f, 80.4672f, 96.5606f};
 
 // --- Persistence ---
@@ -263,53 +249,28 @@ SettingsSubmenu active_submenu = SUB_SYSTEM;
 static TouchState T;
 static WebOtaStatus g_ota;              // refreshed once per frame
 static uint32_t g_frame_ms = 0;         // millis() at the start of the frame
-static uint32_t trip_reset_flash_until = 0;
-static uint32_t odo_reset_flash_until = 0;
+static ui::View g_view;                 // what the UI shows (also used for hit testing)
 
-// --- WiFi QR cache ---
-static uint8_t qr_modules[512];
-static QRCode qr;
-static bool qr_ok = false;
-static char qr_payload[240] = "";
+// --- UI-side telemetry and feedback (UI task only) ---
+static float g_hist[ui::G_HIST];        // APEX: longitudinal G, last 4 s at 10 Hz
+static float g_peak_g = 0.0f;           // session peak G (resets with the session max)
+static uint32_t g_max_reset_ms = 0, g_trip_reset_ms = 0, g_odo_reset_ms = 0;
+static uint8_t g_tap_target = ui::TGT_NONE;  // short pressed flash after a tap
+static uint32_t g_tap_ms = 0;
+static bool g_ota_err_overlay = false;  // failed upload: error overlay until "Close"
+static bool g_intro_pending = false;    // first dashboard frame after the splash
 
-// --- Layout (landscape px). Shared by drawing AND hit testing. ---
-static const Rect R_TOPBAR_MAX  = {300, 0, 180, 36};
-static const Rect R_TOPBAR_DEMO = {0, 0, 200, 36};
-static const Rect R_TRIP        = {12, 270, 224, 44};
-static const Rect R_ODOBAR      = {244, 270, 224, 44};
-
-static const Rect R_RUN         = {12, 146, 224, 166};
-static const Rect R_SPLITS      = {244, 146, 224, 166};
-
-static const Rect R_TABBAR      = {8, 38, 464, 34};
-
-static const Rect R_BRIGHT      = {12, 80, 456, 70};
-static const Rect R_UNITS       = {12, 158, 456, 70};
-static const Rect R_THEME       = {12, 236, 456, 70};
-
-static const Rect R_CALCARD     = {12, 80, 456, 118};
-static const Rect R_CAL_MINUS   = {24, 110, 92, 76};
-static const Rect R_CAL_PLUS    = {364, 110, 92, 76};
-static const Rect R_FILTERCARD  = {12, 206, 456, 104};
-static const Rect R_FILTER_FAST = {24, 238, 208, 62};
-static const Rect R_FILTER_OEM  = {248, 238, 208, 62};
-
-static const Rect R_ODOCARD     = {12, 80, 456, 230};
-static const Rect R_ODO_MINUS   = {24, 196, 150, 50};
-static const Rect R_ODO_PLUS    = {306, 196, 150, 50};
-static const Rect R_ODO_RESET   = {24, 256, 432, 44};
-
-static const Rect R_LANG_EN     = {12, 80, 456, 110};
-static const Rect R_LANG_HU     = {12, 198, 456, 110};
-
-static const Rect R_WIFI_TOGGLE = {12, 80, 456, 62};
-static const Rect R_WIFI_INFO   = {12, 150, 264, 160};
-static const Rect R_WIFI_QR     = {284, 150, 184, 160};
-static const Rect R_WIFI_HELP   = {12, 150, 456, 160};
-
-// Gauge centre (dashboard)
-static const int GCX = 240;
-static const int GCY = 152;
+// Debug console mock data (display only, never saved): the mockups' sample
+// ride, race and update states so screenshots can be compared 1:1.
+enum MockRace : uint8_t { MR_OFF = 0, MR_READY, MR_PULLING, MR_FINISHED, MR_STOP };
+static struct {
+  bool on;              // sample ride data: max 74, ride 42:18, trip 18.4, odo 1 284.6
+  bool wifi, demo;      // fake status icons in the top bar
+  uint8_t race;         // MockRace
+  uint8_t ota;          // ui::OtaView
+  float hold_max, hold_trip, hold_odo;  // fake hold progress (< 0 = off)
+  int16_t boot;         // >= 0: show the boot splash frozen at this time (ms)
+} g_mock = {false, false, false, MR_OFF, ui::OTA_NONE, -1.0f, -1.0f, -1.0f, -1};
 
 // ================================================================================
 // 4. SPEED SENSOR ISR & SPEED ENGINE
@@ -463,9 +424,10 @@ static void loadSettings() {
   p.cal = roundf(p.cal * 100.0f) / 100.0f;
   if (!(p.odo >= 0.0 && p.odo < 1.0e7)) p.odo = 0.0;
   if (!(p.trip >= 0.0 && p.trip < 1.0e7)) p.trip = 0.0;
-  if (p.skin < 0 || p.skin > 3) p.skin = SKIN_PRO_ARC;
-  if (!(p.best_m >= 0.0f && p.best_m < 600.0f)) p.best_m = 0.0f;
-  if (!(p.best_i >= 0.0f && p.best_i < 600.0f)) p.best_i = 0.0f;
+  if (p.skin < 0 || p.skin > 3) p.skin = ui::SKIN_HALO;
+  // 0 = no record; anything faster than RACE_MIN_PLAUSIBLE_S is sensor noise
+  if (!(p.best_m >= RACE_MIN_PLAUSIBLE_S && p.best_m < 600.0f)) p.best_m = 0.0f;
+  if (!(p.best_i >= RACE_MIN_PLAUSIBLE_S && p.best_i < 600.0f)) p.best_i = 0.0f;
   if (p.lang != LANG_EN && p.lang != LANG_HU) p.lang = LANG_EN;
 
   screen_brightness = p.bright;
@@ -476,7 +438,7 @@ static void loadSettings() {
   g_trip_km = p.trip;
   portEXIT_CRITICAL(&g_tel_mux);
   ride_seconds = p.ride;
-  current_skin = (GaugeSkin)p.skin;
+  current_skin = (ui::Skin)p.skin;
   imperial_mode = p.imperial;
   theme_light = p.light;
   best_0_50_time = p.best_m;
@@ -761,7 +723,7 @@ static void raceTimerUpdate(float v, int64_t t_us, bool moving, int64_t start_us
       last_run_imperial = run_imperial;
       if (!demo_mode) {
         volatile float &best = run_imperial ? best_0_30mph_time : best_0_50_time;
-        if (best <= 0.01f || r < best) {
+        if (r >= RACE_MIN_PLAUSIBLE_S && (best <= 0.01f || r < best)) {
           best = r;
           save_requested = true;
         }
@@ -908,6 +870,16 @@ static void updateTelemetry(uint32_t dt_ms) {
 
   if (filtered > session_max_speed) session_max_speed = filtered;
 
+  // Debug console fake speed / G (rendering tests): display values only.
+  // Odometer, ride time, max speed and the race timer use the real sensor
+  // values computed above/below, and nothing here is persisted.
+  float dbg_v;
+  if (dbg::speedOverride(dbg_v)) bike_speed_kmh = dbg_v;
+  if (dbg::accelOverride(dbg_v)) {
+    current_accel_g = dbg_v > 0.0f ? dbg_v : 0.0f;
+    current_accel_pct = (int)lroundf(constrain(current_accel_g * 9.80665f / 4.5f, 0.0f, 1.0f) * 100.0f);
+  }
+
   // Ride time: accumulate real frame time (no lost fractions)
   static uint32_t ride_ms_acc = 0;
   if (!demo_mode && filtered > 1.0f) {
@@ -922,81 +894,17 @@ static void updateTelemetry(uint32_t dt_ms) {
 }
 
 // ================================================================================
-// 9. TOUCH: TARGETS, HIT TESTING, GESTURES
+// 9. TOUCH: GESTURES (targets and hit testing live in ui_screens.cpp)
 // ================================================================================
 
-static const char *tabLabel(int i) {
-  static const char *const en[SUB_COUNT] = {"SYSTEM", "SKIN", "SPEED", "ODO", "LANG", "WIFI"};
-  static const char *const hu[SUB_COUNT] = {"RENDSZER", "SKIN", "SEBESS.", "ODO", "NYELV", "WIFI"};
-  return (current_lang == LANG_HU) ? hu[i] : en[i];
-}
-
-// Tab widths follow their labels, so 6 tabs fit in both languages. Drawing and
-// hit testing both use this, so they can never disagree.
-static void tabLayout(int16_t *xs, int16_t *ws) {
-  const int PAD = 3;
-  int lw[SUB_COUNT];
-  int sum = 0;
-  for (int i = 0; i < SUB_COUNT; i++) {
-    lw[i] = uiTextW(tabLabel(i), &FreeSansBold9pt7b);
-    sum += lw[i];
-  }
-  int extra = (R_TABBAR.w - 2 * PAD - sum) / SUB_COUNT;
-  if (extra < 4) extra = 4;
-  int x = R_TABBAR.x + PAD;
-  for (int i = 0; i < SUB_COUNT; i++) {
-    xs[i] = x;
-    ws[i] = lw[i] + extra;
-    x += ws[i];
-  }
-  ws[SUB_COUNT - 1] = R_TABBAR.right() - PAD - xs[SUB_COUNT - 1];
-}
-
-static Rect tabHitRect(int i) {
-  int16_t xs[SUB_COUNT], ws[SUB_COUNT];
-  tabLayout(xs, ws);
-  int x0 = (i == 0) ? 0 : xs[i];
-  int x1 = (i == SUB_COUNT - 1) ? UI_W : xs[i] + ws[i];
-  Rect r = {(int16_t)x0, 34, (int16_t)(x1 - x0), 42};
-  return r;
-}
-
-static Rect skinRect(int i) {
-  Rect r = {12, (int16_t)(80 + i * 58), 456, 52};
-  return r;
-}
-
-static bool targetRect(uint8_t t, Rect &r) {
-  if (t >= TGT_TAB0 && t <= TGT_TAB5) { r = tabHitRect(t - TGT_TAB0); return true; }
-  if (t >= TGT_SKIN0 && t <= TGT_SKIN3) { r = skinRect(t - TGT_SKIN0); return true; }
-  switch (t) {
-    case TGT_BRIGHT:      r = R_BRIGHT; return true;
-    case TGT_UNITS:       r = R_UNITS; return true;
-    case TGT_THEME:       r = R_THEME; return true;
-    case TGT_CAL_MINUS:   r = R_CAL_MINUS; return true;
-    case TGT_CAL_PLUS:    r = R_CAL_PLUS; return true;
-    case TGT_FILTER_FAST: r = R_FILTER_FAST; return true;
-    case TGT_FILTER_OEM:  r = R_FILTER_OEM; return true;
-    case TGT_ODO_MINUS:   r = R_ODO_MINUS; return true;
-    case TGT_ODO_PLUS:    r = R_ODO_PLUS; return true;
-    case TGT_ODO_RESET:   r = R_ODO_RESET; return true;
-    case TGT_LANG_EN:     r = R_LANG_EN; return true;
-    case TGT_LANG_HU:     r = R_LANG_HU; return true;
-    case TGT_WIFI_TOGGLE: r = R_WIFI_TOGGLE; return true;
-    case TGT_TRIP_RESET:  r = R_TRIP; return true;
-    case TGT_MAX_RESET:   r = R_TOPBAR_MAX; return true;
-    case TGT_RACE_RESET:  r = R_RUN; return true;
-    case TGT_DEMO:        r = R_TOPBAR_DEMO; return true;
-    default: return false;
-  }
-}
+using namespace ui;  // Target names (TGT_*), View
 
 static uint8_t touchKind(uint8_t t) {
   switch (t) {
     case TGT_NONE: return TK_NONE;
     case TGT_BRIGHT: return TK_DRAG;
     case TGT_CAL_MINUS: case TGT_CAL_PLUS: case TGT_ODO_MINUS: case TGT_ODO_PLUS: return TK_REPEAT;
-    case TGT_TRIP_RESET: case TGT_ODO_RESET: case TGT_DEMO: return TK_LONG;
+    case TGT_TRIP_RESET: case TGT_MAX_RESET: case TGT_ODO_RESET: case TGT_DEMO: return TK_LONG;
     default: return TK_TAP;
   }
 }
@@ -1004,95 +912,71 @@ static uint8_t touchKind(uint8_t t) {
 static uint16_t longPressMs(uint8_t t) {
   switch (t) {
     case TGT_TRIP_RESET: return 1000;
+    case TGT_MAX_RESET:  return 1000;
     case TGT_ODO_RESET:  return 2000;
     case TGT_DEMO:       return 3000;
     default: return 0;
   }
 }
 
-static uint8_t hitTest(int x, int y) {
-  uint8_t list[12];
-  int n = 0;
-  if (current_screen == SCREEN_DASHBOARD) {
-    list[n++] = TGT_TRIP_RESET;
-    list[n++] = TGT_MAX_RESET;
-  } else if (current_screen == SCREEN_RACE) {
-    list[n++] = TGT_RACE_RESET;
-  } else if (current_screen == SCREEN_SETTINGS) {
-    list[n++] = TGT_DEMO;
-    for (int i = 0; i < SUB_COUNT; i++) list[n++] = TGT_TAB0 + i;
-    for (int i = 0; i < n; i++) {
-      Rect r;
-      if (targetRect(list[i], r) && r.contains(x, y)) return list[i];
-    }
-    n = 0;
-    switch (active_submenu) {
-      case SUB_SYSTEM:   list[n++] = TGT_BRIGHT; list[n++] = TGT_UNITS; list[n++] = TGT_THEME; break;
-      case SUB_SKIN:     for (int i = 0; i < 4; i++) list[n++] = TGT_SKIN0 + i; break;
-      case SUB_SPEED:    list[n++] = TGT_CAL_MINUS; list[n++] = TGT_CAL_PLUS;
-                         list[n++] = TGT_FILTER_FAST; list[n++] = TGT_FILTER_OEM; break;
-      case SUB_ODO:      list[n++] = TGT_ODO_MINUS; list[n++] = TGT_ODO_PLUS; list[n++] = TGT_ODO_RESET; break;
-      case SUB_LANGUAGE: list[n++] = TGT_LANG_EN; list[n++] = TGT_LANG_HU; break;
-      case SUB_WIFI:     list[n++] = TGT_WIFI_TOGGLE; break;
-      default: break;
-    }
-  }
-  for (int i = 0; i < n; i++) {
-    Rect r;
-    if (targetRect(list[i], r) && r.contains(x, y)) return list[i];
-  }
-  return TGT_NONE;
-}
-
+// Finger is down on `tgt` (and still inside it): pressed look.
 static bool uiPressed(uint8_t tgt) {
-  if (!T.down || T.target != tgt || T.cancelled || T.swiped) return false;
+  if (!T.down || T.target != tgt || T.cancelled || T.sliding) return false;
   Rect r;
-  return targetRect(tgt, r) && r.contains(T.x, T.y);
+  return targetRect(g_view, tgt, r) && r.contains(T.x, T.y);
 }
 
-// 0..1 progress of a running long-press on `tgt` (for the fill animation).
+// Hold-to-reset progress 0..1 while the finger holds `tgt`, -1 otherwise.
 static float uiHold(uint8_t tgt) {
-  if (!T.down || T.target != tgt || T.cancelled || T.fired) return 0.0f;
-  uint16_t d = longPressMs(tgt);
-  if (!d) return 0.0f;
-  float p = (float)(g_frame_ms - T.t0) / (float)d;
+  if (!T.down || T.target != tgt || T.cancelled || T.fired) return -1.0f;
+  const uint16_t d = longPressMs(tgt);
+  if (!d) return -1.0f;
+  const float p = (float)(g_frame_ms - T.t0) / (float)d;
   return p > 1.0f ? 1.0f : (p < 0.0f ? 0.0f : p);
 }
 
-static void applyParamAdjust(uint8_t tgt, int level) {
+static void applyParamAdjust(uint8_t tgt) {
   if (tgt == TGT_CAL_MINUS || tgt == TGT_CAL_PLUS) {
-    int dir = (tgt == TGT_CAL_PLUS) ? 1 : -1;
-    float step = (level >= 2) ? 0.02f : 0.01f;
-    float v = speed_cal + dir * step;
+    const int dir = (tgt == TGT_CAL_PLUS) ? 1 : -1;
+    float v = speed_cal + dir * 0.01f;
     v = roundf(v * 100.0f) / 100.0f;  // no float drift (0.99999x)
     speed_cal = constrain(v, 0.50f, 2.00f);
   } else if (tgt == TGT_ODO_MINUS || tgt == TGT_ODO_PLUS) {
-    int dir = (tgt == TGT_ODO_PLUS) ? 1 : -1;
-    double step = (level >= 2) ? 50.0 : 10.0;
+    // 10 units of the current system (10 km or 10 mi)
+    const double step = (tgt == TGT_ODO_PLUS ? 1.0 : -1.0) * (imperial_mode ? 10.0 / KMH_TO_MPH : 10.0);
     portENTER_CRITICAL(&g_tel_mux);
-    g_odo_km += dir * step;
+    g_odo_km += step;
     if (g_odo_km < 0.0) g_odo_km = 0.0;
     portEXIT_CRITICAL(&g_tel_mux);
   }
   markSettingsDirty();
 }
 
+static uint8_t pageOf(ScreenState s) {
+  return s == SCREEN_SETTINGS ? PAGE_SETTINGS : (s == SCREEN_RACE ? PAGE_RACE : PAGE_DASH);
+}
+
 static void navigate(int dir) {
   static const ScreenState order[3] = {SCREEN_SETTINGS, SCREEN_DASHBOARD, SCREEN_RACE};
-  int idx = 1;
-  for (int i = 0; i < 3; i++) if (order[i] == current_screen) idx = i;
-  idx += dir;
+  int idx = pageOf(current_screen) + dir;
   if (idx < 0) idx = 0;
   if (idx > 2) idx = 2;
   current_screen = order[idx];
 }
 
+static void resetSessionMax() {
+  session_max_speed = 0.0f;
+  g_peak_g = 0.0f;
+}
+
 static void fireTap(uint8_t t) {
   if (t >= TGT_TAB0 && t <= TGT_TAB5) { active_submenu = (SettingsSubmenu)(t - TGT_TAB0); return; }
-  if (t >= TGT_SKIN0 && t <= TGT_SKIN3) { current_skin = (GaugeSkin)(t - TGT_SKIN0); save_requested = true; return; }
+  if (t >= TGT_SKIN0 && t <= TGT_SKIN3) { current_skin = (ui::Skin)(t - TGT_SKIN0); save_requested = true; return; }
   switch (t) {
-    case TGT_UNITS:       imperial_mode = !imperial_mode; save_requested = true; break;
-    case TGT_THEME:       theme_light = !theme_light; save_requested = true; break;
+    case TGT_UNITS_KMH:   imperial_mode = false; save_requested = true; break;
+    case TGT_UNITS_MPH:   imperial_mode = true; save_requested = true; break;
+    case TGT_THEME_DARK:  theme_light = false; save_requested = true; break;
+    case TGT_THEME_LIGHT: theme_light = true; save_requested = true; break;
     case TGT_FILTER_FAST: speed_filter_oem = false; save_requested = true; break;
     case TGT_FILTER_OEM:  speed_filter_oem = true; save_requested = true; break;
     case TGT_LANG_EN:     current_lang = LANG_EN; save_requested = true; break;
@@ -1101,8 +985,13 @@ static void fireTap(uint8_t t) {
       if (webOtaIsOn()) webOtaEnd();
       else webOtaBegin();
       break;
-    case TGT_MAX_RESET:   session_max_speed = 0.0f; break;
     case TGT_RACE_RESET:  raceManualReset(); break;
+    case TGT_OTA_CLOSE:   // failed update: show the hotspot status (still on) in Settings > WiFi
+      g_ota_err_overlay = false;
+      g_mock.ota = OTA_NONE;
+      current_screen = SCREEN_SETTINGS;
+      active_submenu = SUB_WIFI;
+      break;
     default: break;
   }
 }
@@ -1114,19 +1003,23 @@ static void fireLong(uint8_t t) {
       g_trip_km = 0.0;
       portEXIT_CRITICAL(&g_tel_mux);
       save_requested = true;
-      trip_reset_flash_until = (g_frame_ms + 1500) | 1;
+      g_trip_reset_ms = g_frame_ms | 1;
+      break;
+    case TGT_MAX_RESET:
+      resetSessionMax();
+      g_max_reset_ms = g_frame_ms | 1;
       break;
     case TGT_ODO_RESET:
       portENTER_CRITICAL(&g_tel_mux);
       g_odo_km = 0.0;
       portEXIT_CRITICAL(&g_tel_mux);
       save_requested = true;
-      odo_reset_flash_until = (g_frame_ms + 1500) | 1;
+      g_odo_reset_ms = g_frame_ms | 1;
       break;
     case TGT_DEMO:
       demo_mode = !demo_mode;
       demo_speed = 0.0f;
-      session_max_speed = 0.0f;
+      resetSessionMax();
       raceManualReset();
       Serial.printf("[UI] Demo mode %s\n", demo_mode ? "ON" : "OFF");
       break;
@@ -1134,12 +1027,13 @@ static void fireLong(uint8_t t) {
   }
 }
 
+// Brightness slider: 8..100 % over x 158..422; stored as PWM 20..255 (NVS "bright").
+static int brightPct(int pwm) { return constrain((int)lroundf(pwm / 2.55f), 8, 100); }
+
 static void applyDrag(uint8_t t, int x) {
   if (t != TGT_BRIGHT) return;
-  const int x0 = R_BRIGHT.x + 18, x1 = R_BRIGHT.right() - 18;
-  x = constrain(x, x0, x1);
-  int b = 20 + (int)lroundf((float)(x - x0) * (255 - 20) / (float)(x1 - x0));
-  b = constrain(b, 20, 255);
+  const int pct = constrain(8 + (int)lroundf(92.0f * (x - 158) / 264.0f), 8, 100);
+  const int b = constrain((int)lroundf(pct * 2.55f), 20, 255);
   if (b != screen_brightness) {
     screen_brightness = b;
     analogWrite(GFX_BL, b);
@@ -1147,15 +1041,18 @@ static void applyDrag(uint8_t t, int x) {
   }
 }
 
-// Gestures: tap (on release), hold-to-repeat, drag, long-press and swipe.
-// `blocked` swallows all input (firmware update overlay).
+// Gestures: tap (on release), hold-to-repeat, drag, long-press and page swipe
+// (the page follows the finger; > 60 px or a fling > 0.35 px/ms changes page).
+// Hit testing uses g_view, i.e. the layout that is on screen. `blocked`
+// swallows all input (firmware update in progress).
 static void handleTouch(bool blocked) {
   uint16_t tx = 0, ty = 0;
-  const bool touched = display.getTouchPoint(tx, ty);
+  bool touched;
+  if (!dbg::touchOverride(tx, ty, touched)) touched = display.getTouchPoint(tx, ty);
   const uint32_t now = g_frame_ms;
   if (touched) {
-    if (tx > UI_W - 1) tx = UI_W - 1;
-    if (ty > UI_H - 1) ty = UI_H - 1;
+    if (tx > gfx::W - 1) tx = gfx::W - 1;
+    if (ty > gfx::H - 1) ty = gfx::H - 1;
   }
 
   if (blocked) {
@@ -1176,15 +1073,19 @@ static void handleTouch(bool blocked) {
       T.down = true;
       T.x0 = T.x = tx;
       T.y0 = T.y = ty;
-      T.t0 = now;
+      T.t0 = T.last_ms = now;
       T.last_repeat = now;
-      T.target = hitTest(tx, ty);
+      T.target = hitTest(g_view, tx, ty);
       T.kind = touchKind(T.target);
-      T.no_swipe = (current_screen == SCREEN_SETTINGS && ty < 76) || T.kind == TK_DRAG || T.kind == TK_REPEAT;
-      if (T.kind == TK_REPEAT) applyParamAdjust(T.target, 0);
+      T.no_swipe = T.kind == TK_DRAG || T.kind == TK_REPEAT || g_view.ota_view != OTA_NONE;
+      if (T.kind == TK_REPEAT) applyParamAdjust(T.target);
       if (T.kind == TK_DRAG) applyDrag(T.target, tx);
       return;
     }
+    // finger velocity for flings (smoothed over a few frames)
+    const uint32_t fdt = now - T.last_ms;
+    if (fdt > 0) T.vx = 0.5f * T.vx + 0.5f * (float)((int)tx - T.x) / (float)fdt;
+    T.last_ms = now;
     T.x = tx;
     T.y = ty;
     const int dx = (int)T.x - T.x0, dy = (int)T.y - T.y0;
@@ -1192,19 +1093,22 @@ static void handleTouch(bool blocked) {
     if (T.kind == TK_DRAG) { applyDrag(T.target, tx); return; }
     if (T.kind == TK_REPEAT) {
       Rect r;
-      if (!(targetRect(T.target, r) && r.contains(tx, ty))) return;  // slid off: pause
+      if (!(targetRect(g_view, T.target, r) && r.contains(tx, ty))) return;  // slid off: pause
+      // First repeat after 400 ms. Calibration: 12/s, 40/s after 2 s. Odometer: 8/s.
       const uint32_t held = now - T.t0;
-      if (held >= 350) {
-        uint32_t interval = 140;
-        int lvl = 0;
-        if (held >= 2000) { interval = 40; lvl = 2; }
-        else if (held >= 1000) { interval = 80; lvl = 1; }
+      if (held >= 400) {
+        const bool cal = T.target == TGT_CAL_MINUS || T.target == TGT_CAL_PLUS;
+        const uint32_t interval = cal ? (held >= 2000 ? 25 : 83) : 125;
         if (now - T.last_repeat >= interval) {
           T.last_repeat = now;
-          applyParamAdjust(T.target, lvl);
+          applyParamAdjust(T.target);
         }
       }
       return;
+    }
+    if (!T.no_swipe && !T.sliding && !T.fired && abs(dx) >= 16 && abs(dx) > abs(dy)) {
+      T.sliding = true;   // horizontal drag: the page follows the finger
+      T.cancelled = true;
     }
     if (T.kind == TK_LONG && !T.cancelled && !T.fired) {
       if (abs(dx) > 25 || abs(dy) > 25) T.cancelled = true;
@@ -1213,787 +1117,293 @@ static void handleTouch(bool blocked) {
         fireLong(T.target);
       }
     }
-    if (!T.no_swipe && !T.swiped && !T.fired && abs(dx) >= 60 && abs(dx) * 2 > abs(dy) * 3) {
-      navigate(dx < 0 ? +1 : -1);  // swipe left -> next screen
-      T.swiped = true;
-      T.cancelled = true;
-    }
     return;
   }
 
   if (!T.down) return;
   // Released
   T.down = false;
-  if (T.swiped || T.cancelled || T.fired) return;
+  if (T.sliding) {
+    T.sliding = false;
+    const int dx = (int)T.x - T.x0;
+    const bool fling = fabsf(T.vx) > 0.35f && (T.vx < 0) == (dx < 0);
+    if (abs(dx) > 60 || fling) navigate(dx < 0 ? +1 : -1);  // swipe left -> next page
+    return;
+  }
+  if (T.cancelled || T.fired) return;
   if (T.kind == TK_DRAG) { markSettingsDirty(); return; }
   if (T.kind == TK_REPEAT) return;
   const int dx = (int)T.x - T.x0, dy = (int)T.y - T.y0;
-  const uint32_t dur = now - T.t0;
-  if (!T.no_swipe && abs(dx) >= 45 && abs(dx) * 5 > abs(dy) * 7 && dur < 600) {
-    navigate(dx < 0 ? +1 : -1);  // quick flick
-    return;
+  if (T.kind == TK_TAP && abs(dx) < 25 && abs(dy) < 25) {
+    g_tap_target = T.target;  // 120 ms pressed flash
+    g_tap_ms = now;
+    fireTap(T.target);
   }
-  if (T.kind == TK_TAP && abs(dx) < 25 && abs(dy) < 25) fireTap(T.target);
 }
 
 // ================================================================================
-// 10. RENDERING: SHARED PIECES
+// 10. VIEW STATE (telemetry -> ui::View, once per frame)
 // ================================================================================
 
-static void drawTopBar(const char *title, const GFXfont *tf, uint16_t tcol,
-                       const char *right, uint16_t rcol, int page) {
-  const int MID = 17;
-  uiTextMid(title, 14, MID, tf, tcol, AL_LEFT);
-  uiPageDots(240, MID, 3, page);
 
-  const int rw = uiTextW(right, &FreeSansBold9pt7b);
-  uiTextMid(right, 466, MID, &FreeSansBold9pt7b, rcol, AL_RIGHT);
-  int x = 466 - rw - 12;  // right edge for status icons
-  if (g_ota.state != WEBOTA_OFF) {
-    uiWifiIcon(x - 11, MID + 7, g_ota.state == WEBOTA_ERROR ? P->red : P->accent);
-    x -= 30;
-  }
-  if (demo_mode) {
-    const int bw = uiTextW("DEMO", &FreeSansBold9pt7b) + 14;
-    int bx = 14 + uiTextW(title, tf) + 10;       // prefer next to the title
-    if (bx + bw > 222) bx = x - bw;               // ...unless it would hit the dots
-    uiRRect(bx, MID - 10, bw, 20, 10, P->amber);
-    uiTextMid("DEMO", bx + bw / 2, MID, &FreeSansBold9pt7b, P->on_accent, AL_CENTER);
-  }
-}
-
-static uint16_t speedZoneColor(float pct) {
-  if (pct < 0.60f) return P->accent;
-  if (pct < 0.85f) return P->amber;
-  return P->red;
-}
-
-static void drawBootScreen() {
-  P = theme_light ? &PAL_LIGHT : &PAL_DARK;
-  ui_g->fillScreen(C565(8, 12, 22));
-  const int lx = (UI_W - LOGO_WIDTH) / 2;
-  const int ly = (UI_H - LOGO_HEIGHT) / 2 - 10;
-  for (int y = 0; y < LOGO_HEIGHT; y++) {
-    for (int x = 0; x < LOGO_WIDTH; x++) {
-      uint16_t c = pgm_read_word(&logo_bitmap[y * LOGO_WIDTH + x]);
-      if (c != 0x0000) ui_g->drawPixel(lx + x, ly + y, c);
+// Deterministic launch trace of the mockups (gTrace), newest last.
+static void mockGTrace(float *out, int n, float end) {
+  for (int i = 0; i < n; i++) {
+    const float t = (float)i / (n - 1);
+    float v = 0.02f;
+    if (t >= 0.18f) {
+      const float s = sinf(fminf(1.0f, (t - 0.18f) / 0.5f) * (float)M_PI / 2);
+      v = 0.02f + 0.5f * powf(s, 0.7f) * expf(-fmaxf(0.0f, t - 0.55f) * 3);
     }
+    v += 0.025f * sinf(i * 1.9f) * (t > 0.2f ? 1.0f : 0.3f);
+    out[i] = constrain(v, 0.0f, 0.6f);
   }
-  char buf[40];
-  snprintf(buf, sizeof(buf), "%s  v%s", FW_NAME, FW_VERSION);
-  uiText(buf, UI_W / 2, ly + LOGO_HEIGHT + 18, &FreeSans9pt7b, C565(120, 134, 158), AL_CENTER);
-  display.flush();
-  delay(1200);
+  out[n - 1] = end;
+  out[n - 2] = (out[n - 3] + end) / 2;
 }
 
-// ================================================================================
-// 11. DASHBOARD
-// ================================================================================
-
-static void gaugeProArc(float pct, const char *spd, const char *unit) {
-  const int N = 26;
-  const float span = 270.0f / N;
-  const int active = (int)lroundf(pct * N);
-  for (int i = 0; i < N; i++) {
-    const float a0 = 135.0f + i * span + 1.3f;
-    const float a1 = a0 + span - 2.6f;
-    uint16_t c = P->track;
-    if (i < active) c = (i < N * 60 / 100) ? P->accent : (i < N * 85 / 100) ? P->amber : P->red;
-    uiArc(GCX, GCY, 98, 116, a0, a1, c, 12.0f);
+// APEX telemetry: G history at 10 Hz and the session peak (reads current_accel_g only).
+// A G faked from the debug console shows in the history but never sets the peak.
+static void updateGTelemetry() {
+  static uint32_t last = 0;
+  const float g = constrain((float)current_accel_g, 0.0f, 0.6f);
+  float injected;
+  if (!dbg::accelOverride(injected) && g > g_peak_g) g_peak_g = g;
+  if (g_frame_ms - last >= 100) {
+    last = g_frame_ms;
+    memmove(g_hist, g_hist + 1, sizeof(float) * (ui::G_HIST - 1));
+    g_hist[ui::G_HIST - 1] = g;
   }
-  uiBigText(spd, GCX, 100, P->text, AL_CENTER);
-  uiText(unit, GCX, 184, &FreeSansBold12pt7b, P->accent, AL_CENTER);
 }
 
-static void gaugeCyber(float pct, const char *spd, const char *unit) {
-  const float A0 = 135.0f, SW = 270.0f;
-  uiArcRound(GCX, GCY, 104, 114, A0, A0 + SW, P->track);
-
-  const float lo[4] = {0.0f, 0.45f, 0.75f, 0.90f};
-  const float hi[4] = {0.45f, 0.75f, 0.90f, 1.0f};
-  const uint16_t col[4] = {P->accent, P->green, P->amber, P->red};
-  uint16_t tip_col = P->accent;
-  for (int b = 0; b < 4; b++) {
-    const float s = A0 + lo[b] * SW;
-    const float e = A0 + (pct < hi[b] ? pct : hi[b]) * SW;
-    if (e > s) { uiArc(GCX, GCY, 104, 114, s, e, col[b]); tip_col = col[b]; }
-  }
-  if (pct > 0.004f) {
-    int x, y;
-    uiPolar(GCX, GCY, 109.0f, A0, x, y);
-    uiCircle(x, y, 5, P->accent);                       // round start cap
-    uiPolar(GCX, GCY, 109.0f, A0 + pct * SW, x, y);
-    uiCircle(x, y, 9, tip_col);                         // glowing tip
-    uiCircle(x, y, 4, C565(255, 255, 255));
-  }
-  // End labels just outside the arc ends
-  uiTextMid("0", 150, 244, &FreeSans9pt7b, P->text_dim, AL_CENTER);
-  uiTextMid(imperial_mode ? "50" : "85", 330, 244, &FreeSans9pt7b, P->text_dim, AL_CENTER);
-
-  uiBigText(spd, GCX, 98, P->text, AL_CENTER);
-  uiText(unit, GCX, 180, &FreeSansBold12pt7b, P->accent, AL_CENTER);
-
-  const Rect bar = {180, 214, 120, 6};
-  uiProgress(bar, pct, speedZoneColor(pct));
-}
-
-static void gaugeAnalog(float pct, float gmax, const char *spd, const char *unit) {
-  const float A0 = 135.0f, SW = 270.0f;
-  const float red_from = imperial_mode ? 45.0f : 70.0f;
-  const int minor = imperial_mode ? 5 : 10;
-  const int major = imperial_mode ? 10 : 20;
-
-  uiArc(GCX, GCY, 110, 114, A0, A0 + SW, P->track);
-  uiArc(GCX, GCY, 106, 114, A0 + red_from / gmax * SW, A0 + SW, P->red);
-
-  // Ticks and labels at their TRUE angles for the gauge's full scale
-  char b[8];
-  for (int v = 0; v <= (int)gmax; v += minor) {
-    const float a = A0 + (float)v / gmax * SW;
-    const bool mj = (v % major) == 0;
-    const uint16_t c = (v >= red_from) ? P->red : (mj ? P->text : P->text_dim);
-    const float hw = mj ? 1.2f : 0.7f;
-    uiArc(GCX, GCY, mj ? 94 : 102, 114, a - hw, a + hw, c, 5.0f);
-    if (mj) {
-      int lx, ly;
-      uiPolar(GCX, GCY, 80.0f, a, lx, ly);
-      snprintf(b, sizeof(b), "%d", v);
-      uiTextMid(b, lx, ly, &FreeSans9pt7b, P->text_dim, AL_CENTER);
-    }
-  }
-
-  // Tapered needle
-  const float na = (A0 + pct * SW) * UI_DEG2RAD;
-  const float ux = cosf(na), uy = sinf(na);
-  const float px = -uy, py = ux;
-  ui_g->fillTriangle(lroundf(GCX + 100 * ux), lroundf(GCY + 100 * uy),
-                     lroundf(GCX - 16 * ux + 6 * px), lroundf(GCY - 16 * uy + 6 * py),
-                     lroundf(GCX - 16 * ux - 6 * px), lroundf(GCY - 16 * uy - 6 * py), P->red);
-
-  // Hub with digital readout
-  uiCircle(GCX, GCY, 42, P->border);
-  uiCircle(GCX, GCY, 40, P->surface);
-  uiText(spd, GCX, 130, &FreeSansBold18pt7b, P->text, AL_CENTER);
-  uiText(unit, GCX, 162, &FreeSans9pt7b, P->accent, AL_CENTER);
-}
-
-static void gaugeF1(float pct, const char *spd, const char *unit) {
-  // Shift lights
-  const int N = 15;
-  const int act = (int)lroundf(pct * N);
-  const bool flash = pct >= 0.92f && ((g_frame_ms / 80) % 2 == 0);
-  for (int i = 0; i < N; i++) {
-    const int x = 75 + i * 22, y = 40;
-    if (flash) uiRRect(x, y, 18, 14, 3, P->text);
-    else if (i < act) uiRRect(x, y, 18, 14, 3, i < 5 ? P->green : (i < 10 ? P->red : P->purple));
-    else { uiRRect(x, y, 18, 14, 3, P->track); uiRRectLine(x, y, 18, 14, 3, P->border); }
-  }
-
-  const Rect L = {14, 62, 90, 200}, C = {112, 62, 256, 200}, R = {376, 62, 90, 200};
-  uiCard(L, false, false, 10);
-  uiCard(R, false, false, 10);
-  uiCard(C, false, false, 10);
-
-  // Left: G-force
-  char b[16];
-  uiText("G-FORCE", L.cx(), 74, &FreeSansBold9pt7b, P->text_dim, AL_CENTER);
-  snprintf(b, sizeof(b), "%.2fG", current_accel_g);
-  uiText(b, L.cx(), 96, &FreeSansBold12pt7b, current_accel_pct > 60 ? P->amber : P->accent, AL_CENTER);
-  for (int i = 0; i < 10; i++) {
-    const int by = 212 - i * 10;
-    uint16_t c = P->track;
-    if (i < current_accel_pct / 10) c = (i < 5) ? P->green : (i < 8 ? P->amber : P->red);
-    uiRRect(L.x + 15, by, 60, 7, 2, c);
-  }
-  const bool boost = current_accel_pct > 50;
-  uiText(boost ? "BOOST" : "PULL", L.cx(), 232, &FreeSansBold9pt7b, boost ? P->red : P->green, AL_CENTER);
-
-  // Right: peak, mode, DRS
-  uiText("PEAK", R.cx(), 74, &FreeSansBold9pt7b, P->text_dim, AL_CENTER);
-  snprintf(b, sizeof(b), "%d", (int)lroundf(session_max_speed * (imperial_mode ? KMH_TO_MPH : 1.0f)));
-  uiText(b, R.cx(), 96, &FreeSansBold12pt7b, P->amber, AL_CENTER);
-  const Rect mode = {386, 128, 70, 50};
-  uiRRect(mode, 8, P->surface_hi);
-  uiText("MODE", mode.cx(), 135, &FreeSans9pt7b, P->text_dim, AL_CENTER);
-  uiText("HOT", mode.cx(), 154, &FreeSansBold12pt7b, P->red, AL_CENTER);
-  const bool drs = pct >= 0.6f;
-  const Rect drsr = {386, 196, 70, 34};
-  uiRRect(drsr, 8, drs ? P->green : P->surface_hi);
-  uiTextMid("DRS", drsr.cx(), drsr.cy(), &FreeSansBold9pt7b, drs ? P->on_accent : P->text_dim, AL_CENTER);
-
-  // Centre HUD with red corner brackets
-  const uint16_t red = P->red;
-  uiFill(C.x, C.y, 18, 3, red);                 uiFill(C.x, C.y, 3, 18, red);
-  uiFill(C.right() - 18, C.y, 18, 3, red);      uiFill(C.right() - 3, C.y, 3, 18, red);
-  uiFill(C.x, C.bottom() - 3, 18, 3, red);      uiFill(C.x, C.bottom() - 18, 3, 18, red);
-  uiFill(C.right() - 18, C.bottom() - 3, 18, 3, red); uiFill(C.right() - 3, C.bottom() - 18, 3, 18, red);
-
-  uiBigText(spd, 240, 86, P->text, AL_CENTER);
-  const Rect cap = {195, 172, 90, 26};
-  uiRRect(cap, 8, P->surface_hi);
-  uiRRectLine(cap, 8, P->accent);
-  uiTextMid(unit, cap.cx(), cap.cy(), &FreeSansBold9pt7b, P->accent, AL_CENTER);
-  const Rect bar = {134, 222, 212, 6};
-  uiProgress(bar, pct, speedZoneColor(pct));
-}
-
-static void drawDashBottom(double odo, double trip) {
-  const float k = imperial_mode ? KMH_TO_MPH : 1.0f;
-  const char *du = imperial_mode ? "mi" : "km";
-  char v[24];
-
-  // TRIP (hold 1 s to reset, with a filling progress bar)
-  const float hold = uiHold(TGT_TRIP_RESET);
-  uiCard(R_TRIP, false, false);
-  if (hold > 0.0f) {
-    uiRRect(R_TRIP.x, R_TRIP.y, (int)(R_TRIP.w * hold), R_TRIP.h, UI_RADIUS, P->danger_bg);
-    uiRRectLine(R_TRIP, UI_RADIUS, P->red);
-  }
-  const int cy = R_TRIP.cy();
-  uiTextMid("TRIP", R_TRIP.x + 12, cy, &FreeSans9pt7b, P->text_dim);
-  snprintf(v, sizeof(v), "%.1f %s", trip * k, du);
-  const int vx = R_TRIP.x + 12 + uiTextW("TRIP", &FreeSans9pt7b) + 10;
-  uiTextMid(v, vx, cy, &FreeSansBold12pt7b, P->text);
-  const int vend = vx + uiTextW(v, &FreeSansBold12pt7b);
-  const char *hint;
-  uint16_t hcol;
-  if (trip_reset_flash_until && (int32_t)(trip_reset_flash_until - g_frame_ms) > 0) { hint = "RESET!"; hcol = P->green; }
-  else if (hold > 0.0f) { hint = TR("HOLD..", "TART.."); hcol = P->red; }
-  else { hint = TR("HOLD", "TART"); hcol = P->text_faint; }
-  if (vend + 8 + uiTextW(hint, &FreeSans9pt7b) < R_TRIP.right() - 10)
-    uiTextMid(hint, R_TRIP.right() - 10, cy, &FreeSans9pt7b, hcol, AL_RIGHT);
-
-  // ODO
-  uiCard(R_ODOBAR, false, false);
-  uiTextMid("ODO", R_ODOBAR.x + 12, cy, &FreeSans9pt7b, P->text_dim);
-  snprintf(v, sizeof(v), "%.1f %s", odo * k, du);
-  uiTextMid(v, R_ODOBAR.right() - 12, cy, &FreeSansBold12pt7b, P->accent, AL_RIGHT);
-}
-
-static void drawDashboard(double odo, double trip) {
-  float v = bike_speed_kmh;
-  if (imperial_mode) v *= KMH_TO_MPH;
-  const char *unit = imperial_mode ? "MPH" : "KM/H";
-
-  // Hysteresis on the displayed integer (no digit flicker)
-  static int stable_spd = 0;
-  const int rounded = (int)lroundf(v);
-  if (fabsf(v - (float)stable_spd) >= 0.65f || rounded == 0) stable_spd = rounded;
-  char spd[8];
-  snprintf(spd, sizeof(spd), "%d", stable_spd);
-
-  const float gmax = imperial_mode ? GAUGE_MAX_MPH : GAUGE_MAX_KMH;
-  const float pct = constrain(v / gmax, 0.0f, 1.0f);
-
-  // Top bar
-  char left[24], right[24];
-  const unsigned rs = ride_seconds;
-  const unsigned hrs = rs / 3600, mins = (rs / 60) % 60;
-  if (hrs > 0) snprintf(left, sizeof(left), "RIDE %uh %02um", hrs, mins);
-  else snprintf(left, sizeof(left), "RIDE %02u:%02u", mins, rs % 60);
-  snprintf(right, sizeof(right), "MAX %d %s", (int)lroundf(session_max_speed * (imperial_mode ? KMH_TO_MPH : 1.0f)), unit);
-  drawTopBar(left, &FreeSansBold9pt7b, P->text_dim, right, P->amber, 1);
-  if (uiPressed(TGT_MAX_RESET)) uiRRectLine(R_TOPBAR_MAX.x + 20, 4, R_TOPBAR_MAX.w - 24, 28, 8, P->amber);
-
-  switch (current_skin) {
-    case SKIN_CYBER_HORIZON: gaugeCyber(pct, spd, unit); break;
-    case SKIN_ANALOG_SPORT:  gaugeAnalog(pct, gmax, spd, unit); break;
-    case SKIN_F1_RACE:       gaugeF1(pct, spd, unit); break;
-    default:                 gaugeProArc(pct, spd, unit); break;
-  }
-
-  drawDashBottom(odo, trip);
-}
-
-// ================================================================================
-// 12. RACE SCREEN
-// ================================================================================
-
-static void fmtTime(char *buf, size_t n, float t) {
-  if (t > 0.001f) snprintf(buf, n, "%.2f s", t);
-  else strlcpy(buf, "--.-- s", n);
-}
-
-static void drawRace() {
+static void buildView(ui::View &v) {
   const bool imp = imperial_mode;
-  float v = bike_speed_kmh;
-  if (imp) v *= KMH_TO_MPH;
-  const int spd = (int)lroundf(v);
-  const float pct = constrain(v / (imp ? GAUGE_MAX_MPH : GAUGE_MAX_KMH), 0.0f, 1.0f);
-
-  drawTopBar(TR("RACE MODE", "VERSENY MOD"), &FreeSansBold12pt7b, P->accent,
-             imp ? "0-30 MPH" : "0-50 KM/H", P->amber, 2);
-
-  // Shift / speed LED bar
-  const int LEDS = 28;
-  const int lit = (int)lroundf(pct * LEDS);
-  for (int i = 0; i < LEDS; i++) {
-    const int x = 18 + i * 16;
-    uint16_t c = P->track;
-    if (i < lit) {
-      if (i < LEDS * 50 / 100) c = P->green;
-      else if (i < LEDS * 75 / 100) c = P->amber;
-      else if (i < LEDS * 90 / 100) c = P->red;
-      else c = ((g_frame_ms / 150) % 2 == 0) ? P->text : P->accent;
-    }
-    uiRRect(x, 40, 12, 10, 2, c);
-  }
-
-  // Speed with unit beside it
-  char b[24];
-  snprintf(b, sizeof(b), "%d", spd);
-  uiBigText(b, 240, 56, P->text, AL_CENTER);
-  const int nw = uiBigW(b, &FreeSansBold24pt7b);
-  uiText(imp ? "mph" : "km/h", 240 + nw / 2 + 8, 56 + 69 - 17, &FreeSansBold12pt7b, P->text_dim);
-
-  // ── Run card (tap to reset) ──
-  uiCard(R_RUN, false, uiPressed(TGT_RACE_RESET));
-  uiText(imp ? TR("0-30 MPH RUN", "0-30 MPH FUTAM") : TR("0-50 KM/H RUN", "0-50 KM/H FUTAM"),
-         R_RUN.x + 12, 158, &FreeSansBold9pt7b, P->text_dim);
-
-  const char *status;
-  uint16_t scol, tcol;
-  float tval;
-  switch (accel_timer_state) {
-    case ACCEL_RUNNING:
-      status = TR("PULLING...", "GYORSITAS...");
-      scol = P->amber;
-      tval = current_0_50_time;
-      tcol = t_50_us ? P->green : P->accent;
-      break;
-    case ACCEL_FINISHED:
-      status = TR("RUN FINISHED", "FUTAM KESZ");
-      scol = P->green;
-      tval = last_0_50_time;
-      tcol = P->green;
-      break;
-    case ACCEL_WAIT_STOP:
-      status = TR("STOP TO ARM", "ALLJ MEG");
-      scol = P->text_dim;
-      tval = 0.0f;
-      tcol = P->text_faint;
-      break;
-    default:
-      status = TR("LAUNCH READY", "RAJT KESZ");
-      scol = ((g_frame_ms / 500) % 2 == 0) ? P->green : P->text_dim;
-      tval = 0.0f;
-      tcol = P->text;
-      break;
-  }
-  uiText(status, R_RUN.cx(), 180, &FreeSansBold12pt7b, scol, AL_CENTER);
-  if (accel_timer_state == ACCEL_WAIT_STOP) strlcpy(b, "--.--s", sizeof(b));
-  else snprintf(b, sizeof(b), "%.2fs", tval);
-  uiText(b, R_RUN.cx(), 206, &FreeSansBold24pt7b, tcol, AL_CENTER);
-
-  uiHLine(R_RUN.x + 12, 252, R_RUN.w - 24, P->sep);
-  char t[16];
-  uiText(TR("LAST", "UTOLSO"), R_RUN.x + 12, 260, &FreeSans9pt7b, P->text_dim);
-  fmtTime(t, sizeof(t), (last_run_imperial == imp) ? last_0_50_time : 0.0f);
-  uiText(t, R_RUN.right() - 12, 260, &FreeSansBold9pt7b, P->text, AL_RIGHT);
-  uiText(TR("BEST", "LEGJOBB"), R_RUN.x + 12, 284, &FreeSans9pt7b, P->amber);
-  fmtTime(t, sizeof(t), imp ? best_0_30mph_time : best_0_50_time);
-  uiText(t, R_RUN.right() - 12, 284, &FreeSansBold9pt7b, P->amber, AL_RIGHT);
-
-  // ── Splits card ──
-  uiCard(R_SPLITS, false, false);
-  const int lx = R_SPLITS.x + 12, rx = R_SPLITS.right() - 12;
-  uiText(TR("INTERVAL SPLITS", "RESZIDOK"), lx, 158, &FreeSansBold9pt7b, P->accent);
-  uiHLine(lx, 178, R_SPLITS.w - 24, P->sep);
-
-  const char *labels_m[3] = {"50 - 60 KM/H", "60 - 70 KM/H", "70 - 80 KM/H"};
-  const char *labels_i[3] = {"30 - 40 MPH", "40 - 50 MPH", "50 - 60 MPH"};
-  const float splits[3] = {split_50_60, split_60_70, split_70_80};
-  for (int i = 0; i < 3; i++) {
-    const int y = 188 + i * 26;
-    uiText(imp ? labels_i[i] : labels_m[i], lx, y, &FreeSans9pt7b, P->text_dim);
-    fmtTime(t, sizeof(t), splits[i]);
-    uiText(t, rx, y, &FreeSansBold9pt7b, splits[i] > 0.001f ? P->text : P->text_faint, AL_RIGHT);
-  }
-  uiHLine(lx, 266, R_SPLITS.w - 24, P->sep);
-  uiText(imp ? TR("0-60 MPH TOTAL", "0-60 MPH OSSZ") : TR("0-80 KM/H TOTAL", "0-80 KM/H OSSZ"),
-         lx, 278, &FreeSans9pt7b, P->amber);
-  fmtTime(t, sizeof(t), time_0_80);
-  uiText(t, rx, 278, &FreeSansBold9pt7b, time_0_80 > 0.001f ? P->amber : P->text_faint, AL_RIGHT);
-}
-
-// ================================================================================
-// 13. SETTINGS
-// ================================================================================
-
-static void drawTabs() {
-  int16_t xs[SUB_COUNT], ws[SUB_COUNT];
-  tabLayout(xs, ws);
-  uiRRect(R_TABBAR, 12, P->surface);
-  uiRRectLine(R_TABBAR, 12, P->border);
-  for (int i = 0; i < SUB_COUNT; i++) {
-    const Rect r = {xs[i], (int16_t)(R_TABBAR.y + 3), ws[i], (int16_t)(R_TABBAR.h - 6)};
-    const bool active = (active_submenu == i);
-    if (active) uiRRect(r, 9, P->accent);
-    else if (uiPressed(TGT_TAB0 + i)) uiRRect(r, 9, P->pressed);
-    uiTextMid(tabLabel(i), r.cx(), r.cy(), &FreeSansBold9pt7b, active ? P->on_accent : P->text_dim, AL_CENTER);
-  }
-}
-
-static void drawSettingsSystem() {
-  // Brightness slider
-  uiCard(R_BRIGHT, false, false);
-  char b[8];
-  uiText(TR("BRIGHTNESS", "FENYERO"), R_BRIGHT.x + 16, 92, &FreeSansBold9pt7b, P->text_dim);
-  snprintf(b, sizeof(b), "%d%%", (int)lroundf(screen_brightness * 100.0f / 255.0f));
-  uiText(b, R_BRIGHT.right() - 16, 92, &FreeSansBold9pt7b, P->accent, AL_RIGHT);
-  const int x0 = R_BRIGHT.x + 18, x1 = R_BRIGHT.right() - 18;
-  const int fill = (int)lroundf((float)(screen_brightness - 20) * (x1 - x0) / (255 - 20));
-  uiRRect(x0, 122, x1 - x0, 10, 5, P->track);
-  uiRRect(x0, 122, fill < 10 ? 10 : fill, 10, 5, P->accent);
-  const bool drag = T.down && T.target == TGT_BRIGHT;
-  uiCircle(x0 + fill, 127, drag ? 14 : 12, P->accent);
-  uiCircle(x0 + fill, 127, drag ? 6 : 5, P->surface);
-
-  // Units
-  uiCard(R_UNITS, false, uiPressed(TGT_UNITS));
-  uiText(TR("UNITS", "MERTEKEGYSEG"), R_UNITS.x + 16, R_UNITS.y + 14, &FreeSansBold12pt7b, P->text);
-  uiText(TR("Speed & distance", "Sebesseg es tavolsag"), R_UNITS.x + 16, R_UNITS.y + 44, &FreeSans9pt7b, P->text_dim);
-  const Rect su = {272, (int16_t)(R_UNITS.y + 18), 184, 34};
-  uiSegmented(su, "KM/H", "MPH", imperial_mode);
-
-  // Theme
-  uiCard(R_THEME, false, uiPressed(TGT_THEME));
-  uiText(TR("THEME", "TEMA"), R_THEME.x + 16, R_THEME.y + 14, &FreeSansBold12pt7b, P->text);
-  uiText(TR("Night / day display", "Ejszakai / nappali"), R_THEME.x + 16, R_THEME.y + 44, &FreeSans9pt7b, P->text_dim);
-  const Rect st = {272, (int16_t)(R_THEME.y + 18), 184, 34};
-  uiSegmented(st, TR("DARK", "SOTET"), TR("LIGHT", "VILAGOS"), theme_light);
-}
-
-static void drawSettingsSkin() {
-  static const char *const names[4] = {"PRO ARC", "CYBER HORIZON", "ANALOG SPORT", "FORMULA 1"};
-  static const char *const desc_en[4] = {
-    "26-LED segmented race arc & digital speed",
-    "Continuous neon halo & dynamic power bar",
-    "Sports dial & sweeping red needle",
-    "F1 shift lights, telemetry sidebars & HUD"};
-  static const char *const desc_hu[4] = {
-    "26 LED-es szegmenses iv & digitalis kijelzo",
-    "Folytonos neon iv & dinamikus power bar",
-    "Sport szamlap & piros mutato",
-    "F1 shift lampak, telemetria & verseny HUD"};
-  for (int i = 0; i < 4; i++) {
-    const Rect r = skinRect(i);
-    const bool sel = ((int)current_skin == i);
-    uiCard(r, sel, uiPressed(TGT_SKIN0 + i));
-    const int cy = r.cy();
-    uiCircle(r.x + 28, cy, 15, sel ? P->accent : P->surface_hi);
-    char n[2] = {(char)('1' + i), 0};
-    uiTextMid(n, r.x + 28, cy, &FreeSansBold9pt7b, sel ? P->on_accent : P->text_dim, AL_CENTER);
-    uiText(names[i], r.x + 54, cy - 16, &FreeSansBold9pt7b, sel ? P->accent : P->text);
-    uiText(current_lang == LANG_HU ? desc_hu[i] : desc_en[i], r.x + 54, cy + 4, &FreeSans9pt7b, P->text_dim);
-    uiRadio(r.right() - 22, cy, sel);
-  }
-}
-
-static void drawSettingsSpeed() {
-  // Calibration
-  uiCard(R_CALCARD, false, false);
-  uiText(TR("SPEED CALIBRATION", "SEBESSEG KALIBRACIO"), 240, 90, &FreeSansBold9pt7b, P->text_dim, AL_CENTER);
-  uiButton(R_CAL_MINUS, "-0.01", &FreeSansBold12pt7b, uiPressed(TGT_CAL_MINUS), P->surface_hi, P->text);
-  uiButton(R_CAL_PLUS, "+0.01", &FreeSansBold12pt7b, uiPressed(TGT_CAL_PLUS), P->surface_hi, P->text);
-  char b[12];
-  snprintf(b, sizeof(b), "%.2fx", (float)speed_cal);
-  uiBigText(b, 240, 114, P->accent, AL_CENTER);
-
-  // Filter mode
-  uiCard(R_FILTERCARD, false, false);
-  uiText(TR("SPEED RESPONSE & FILTERING", "SEBESSEG VALASZIDO ES SZURES"), 240, 216, &FreeSansBold9pt7b, P->text, AL_CENTER);
-
-  const bool fast = !speed_filter_oem;
-  uiRRect(R_FILTER_FAST, 10, uiPressed(TGT_FILTER_FAST) ? P->pressed : (fast ? P->accent : P->surface_hi));
-  uiText(TR("FAST / ADAPTIVE", "GYORS / VALOS IDEJU"), R_FILTER_FAST.cx(), R_FILTER_FAST.y + 12, &FreeSansBold9pt7b,
-         fast ? P->on_accent : P->text_dim, AL_CENTER);
-  uiText(TR("Zero lag, instant stop", "Azonnali reakcio"), R_FILTER_FAST.cx(), R_FILTER_FAST.y + 36, &FreeSans9pt7b,
-         fast ? P->on_accent : P->text_faint, AL_CENTER);
-
-  const bool oem = speed_filter_oem;
-  uiRRect(R_FILTER_OEM, 10, uiPressed(TGT_FILTER_OEM) ? P->pressed : (oem ? P->amber : P->surface_hi));
-  uiText(TR("OEM SMOOTH", "LASSU / GYARI OEM"), R_FILTER_OEM.cx(), R_FILTER_OEM.y + 12, &FreeSansBold9pt7b,
-         oem ? P->on_accent : P->text_dim, AL_CENTER);
-  uiText(TR("12-pulse average", "Simitott kijelzes"), R_FILTER_OEM.cx(), R_FILTER_OEM.y + 36, &FreeSans9pt7b,
-         oem ? P->on_accent : P->text_faint, AL_CENTER);
-}
-
-static void drawSettingsOdo(double odo) {
-  uiCard(R_ODOCARD, false, false);
-  uiText(TR("TOTAL ODOMETER", "OSSZES MEGTETT TAV"), 240, 92, &FreeSansBold9pt7b, P->text_dim, AL_CENTER);
-  char b[24];
-  snprintf(b, sizeof(b), "%ld KM", (long)llround(odo));
-  uiBigText(b, 240, 112, P->accent, AL_CENTER);
-
-  uiButton(R_ODO_MINUS, "-10 KM", &FreeSansBold12pt7b, uiPressed(TGT_ODO_MINUS), P->surface_hi, P->text);
-  uiButton(R_ODO_PLUS, "+10 KM", &FreeSansBold12pt7b, uiPressed(TGT_ODO_PLUS), P->surface_hi, P->text);
-  uiTextMid(TR("HOLD = FAST", "TART = GYORS"), 240, R_ODO_MINUS.cy(), &FreeSans9pt7b, P->text_faint, AL_CENTER);
-
-  // Reset: hold 2 s (progress fill), no single-tap wipe
-  const float hold = uiHold(TGT_ODO_RESET);
-  uiRRect(R_ODO_RESET, 10, P->danger_bg);
-  if (hold > 0.0f) uiRRect(R_ODO_RESET.x, R_ODO_RESET.y, (int)(R_ODO_RESET.w * hold), R_ODO_RESET.h, 10, P->red);
-  uiRRectLine(R_ODO_RESET, 10, P->red);
-  const char *lbl;
-  if (odo_reset_flash_until && (int32_t)(odo_reset_flash_until - g_frame_ms) > 0) lbl = TR("ODOMETER RESET", "ODO NULLAZVA");
-  else lbl = TR("HOLD 2 s TO RESET ODO", "TARTSD 2 MP: ODO NULLAZAS");
-  uiTextMid(lbl, 240, R_ODO_RESET.cy(), &FreeSansBold9pt7b, hold > 0.5f ? C565(255, 255, 255) : (theme_light ? P->red : P->text), AL_CENTER);
-}
-
-static void drawSettingsLang() {
-  const bool hu = (current_lang == LANG_HU);
-  uiCard(R_LANG_EN, !hu, uiPressed(TGT_LANG_EN));
-  uiText("ENGLISH", R_LANG_EN.x + 24, R_LANG_EN.cy() - 22, &FreeSansBold12pt7b, P->text);
-  uiText("English user interface", R_LANG_EN.x + 24, R_LANG_EN.cy() + 8, &FreeSans9pt7b, P->text_dim);
-  uiRadio(R_LANG_EN.right() - 26, R_LANG_EN.cy(), !hu);
-
-  uiCard(R_LANG_HU, hu, uiPressed(TGT_LANG_HU));
-  uiText("MAGYAR", R_LANG_HU.x + 24, R_LANG_HU.cy() - 22, &FreeSansBold12pt7b, P->text);
-  uiText("Magyar nyelvu felulet", R_LANG_HU.x + 24, R_LANG_HU.cy() + 8, &FreeSans9pt7b, P->text_dim);
-  uiRadio(R_LANG_HU.right() - 26, R_LANG_HU.cy(), hu);
-}
-
-// ---- WiFi QR ----------------------------------------------------------------
-
-// Escapes \ ; , : " as required by the WIFI: QR format.
-static void wifiQrEscape(const char *in, char *out, size_t n) {
-  size_t o = 0;
-  for (; *in && o + 2 < n; ++in) {
-    if (strchr("\\;,:\"", *in)) out[o++] = '\\';
-    out[o++] = *in;
-  }
-  out[o] = 0;
-}
-
-// Byte-mode capacity for ECC LOW, versions 1..10. The bundled QR encoder does
-// NOT check capacity (it overruns its stack buffer), so pick the version here.
-static uint8_t qrVersionFor(size_t len) {
-  static const uint16_t cap[10] = {17, 32, 53, 78, 106, 134, 154, 192, 230, 271};
-  for (uint8_t v = 1; v <= 10; v++) {
-    if (len <= cap[v - 1] && qrcode_getBufferSize(v) <= sizeof(qr_modules)) return v;
-  }
-  return 0;
-}
-
-static void ensureWifiQr(const WebOtaStatus &st) {
-  char ssid[70], pass[134], payload[sizeof(qr_payload)];
-  wifiQrEscape(st.ssid, ssid, sizeof(ssid));
-  wifiQrEscape(st.password, pass, sizeof(pass));
-  if (pass[0]) snprintf(payload, sizeof(payload), "WIFI:T:WPA;S:%s;P:%s;;", ssid, pass);
-  else snprintf(payload, sizeof(payload), "WIFI:T:nopass;S:%s;;", ssid);
-  if (strcmp(payload, qr_payload) == 0) return;
-  strlcpy(qr_payload, payload, sizeof(qr_payload));
-  const uint8_t v = qrVersionFor(strlen(payload));
-  qr_ok = v && qrcode_initText(&qr, qr_modules, v, ECC_LOW, payload) == 0;
-}
-
-static void drawWifiQr(const Rect &panel) {
-  uiRRect(panel, 10, C565(255, 255, 255));  // white in both themes (quiet zone)
-  if (!qr_ok) {
-    uiTextMid("QR ?", panel.cx(), panel.cy(), &FreeSansBold12pt7b, C565(0, 0, 0), AL_CENTER);
-    return;
-  }
-  const int size = qr.size;
-  const int avail = (panel.w < panel.h ? panel.w : panel.h);
-  int m = avail / (size + 8);          // >= 4 module quiet zone
-  if (m < 2) m = avail / (size + 2);
-  if (m < 1) m = 1;
-  const int total = size * m;
-  const int x0 = panel.x + (panel.w - total) / 2;
-  const int y0 = panel.y + (panel.h - total) / 2;
-  const uint16_t black = C565(0, 0, 0);
-  for (int y = 0; y < size; y++) {
-    int x = 0;
-    while (x < size) {
-      if (!qrcode_getModule(&qr, x, y)) { x++; continue; }
-      int run = 1;
-      while (x + run < size && qrcode_getModule(&qr, x + run, y)) run++;
-      ui_g->fillRect(x0 + x * m, y0 + y * m, run * m, m, black);
-      x += run;
-    }
-  }
-}
-
-// Word-wraps `s` into at most 2 lines of `maxw` px.
-static void drawWrapped2(const char *s, int x, int y, int maxw, const GFXfont *f, uint16_t c) {
-  char line[80];
-  size_t len = strlen(s);
-  size_t cut = len;
-  strlcpy(line, s, sizeof(line));
-  if (uiTextW(line, f) > maxw) {
-    // find the last space that fits
-    cut = 0;
-    for (size_t i = 1; i < len && i < sizeof(line) - 1; i++) {
-      if (s[i] != ' ') continue;
-      memcpy(line, s, i);
-      line[i] = 0;
-      if (uiTextW(line, f) <= maxw) cut = i; else break;
-    }
-    if (cut == 0) cut = len;  // no space: will be cut with ".."
-  }
-  memcpy(line, s, cut < sizeof(line) - 1 ? cut : sizeof(line) - 1);
-  line[cut < sizeof(line) - 1 ? cut : sizeof(line) - 1] = 0;
-  char fit[80];
-  uiFit(line, maxw, f, fit, sizeof(fit));
-  uiText(fit, x, y, f, c);
-  if (cut < len) {
-    uiFit(s + cut + 1, maxw, f, fit, sizeof(fit));
-    uiText(fit, x, y + 20, f, c);
-  }
-}
-
-static void drawSettingsWifi() {
-  const bool on = g_ota.state != WEBOTA_OFF;
-  const bool err = g_ota.state == WEBOTA_ERROR;
-
-  uiCard(R_WIFI_TOGGLE, on, uiPressed(TGT_WIFI_TOGGLE));
-  uiText(TR("UPDATE HOTSPOT", "FRISSITO HOTSPOT"), R_WIFI_TOGGLE.x + 16, 91, &FreeSansBold12pt7b, P->text);
-  char sub[64];
-  if (!on) strlcpy(sub, TR("Off - tap to start WiFi update", "Ki - erintsd a WiFi frissiteshez"), sizeof(sub));
-  else if (err) strlcpy(sub, TR("On - last update failed", "Be - a frissites sikertelen"), sizeof(sub));
-  else snprintf(sub, sizeof(sub), TR("On - %u device(s) connected", "Be - %u eszkoz csatlakozva"), (unsigned)g_ota.clients);
-  uiText(sub, R_WIFI_TOGGLE.x + 16, 117, &FreeSans9pt7b, !on ? P->text_dim : (err ? P->red : P->green));
-  uiToggle(R_WIFI_TOGGLE.right() - 72, R_WIFI_TOGGLE.cy() - 15, on, false);
-
-  char fw[48];
-  if (!on) {
-    uiCard(R_WIFI_HELP, false, false);
-    const int x = R_WIFI_HELP.x + 16;
-    uiText(TR("1. Turn on the hotspot above", "1. Kapcsold be a hotspotot fent"), x, 162, &FreeSans9pt7b, P->text);
-    uiText(TR("2. Scan the QR code with your phone", "2. Olvasd be a QR kodot a telefonnal"), x, 188, &FreeSans9pt7b, P->text);
-    uiText(TR("3. Open the address shown", "3. Nyisd meg a kiirt cimet"), x, 214, &FreeSans9pt7b, P->text);
-    uiText(TR("4. Upload the new .bin firmware", "4. Toltsd fel az uj .bin fajlt"), x, 240, &FreeSans9pt7b, P->text);
-    uiHLine(x, 264, R_WIFI_HELP.w - 32, P->sep);
-    snprintf(fw, sizeof(fw), "FIRMWARE %s", FW_VERSION);
-    uiText(fw, x, 276, &FreeSansBold9pt7b, P->text_dim);
-    uiText(FW_BUILD_DATE, R_WIFI_HELP.right() - 16, 276, &FreeSans9pt7b, P->text_faint, AL_RIGHT);
-    uiWifiIcon(404, 238, P->surface_hi, 2.6f);
-    return;
-  }
-
-  // Credentials + status
-  uiCard(R_WIFI_INFO, false, false);
-  const int lx = R_WIFI_INFO.x + 12, vx = R_WIFI_INFO.x + 82, vw = R_WIFI_INFO.right() - 10 - vx;
-  char v[80];
-  uiText("WIFI", lx, 162, &FreeSans9pt7b, P->text_dim);
-  // "WheelieAssist-XXXX" is 168..180 px bold (> vw = 172) but <= 171 px regular
-  const GFXfont *sf = uiTextW(g_ota.ssid, &FreeSansBold9pt7b) <= vw ? &FreeSansBold9pt7b : &FreeSans9pt7b;
-  uiFit(g_ota.ssid, vw, sf, v, sizeof(v));
-  uiText(v, vx, 162, sf, P->text);
-  uiText(TR("PASS", "JELSZO"), lx, 188, &FreeSans9pt7b, P->text_dim);
-  uiFit(g_ota.password[0] ? g_ota.password : "-", vw, &FreeSansBold9pt7b, v, sizeof(v));
-  uiText(v, vx, 188, &FreeSansBold9pt7b, P->text);
-  uiText(TR("OPEN", "CIM"), lx, 214, &FreeSans9pt7b, P->text_dim);
-  char url[40];
-  snprintf(url, sizeof(url), "http://%s", g_ota.ip[0] ? g_ota.ip : "...");
-  uiFit(url, vw, &FreeSansBold9pt7b, v, sizeof(v));
-  uiText(v, vx, 214, &FreeSansBold9pt7b, P->accent);
-  uiHLine(lx, 238, R_WIFI_INFO.w - 24, P->sep);
-  snprintf(fw, sizeof(fw), "FW %s", FW_VERSION);
-  uiText(fw, lx, 248, &FreeSansBold9pt7b, P->text_dim);
-  if (err) {
-    char e[80];
-    snprintf(e, sizeof(e), "%s %s", TR("ERROR:", "HIBA:"), g_ota.error[0] ? g_ota.error : "?");
-    drawWrapped2(e, lx, 272, R_WIFI_INFO.w - 24, &FreeSans9pt7b, P->red);
+  const float k = imp ? KMH_TO_MPH : 1.0f;
+  v.now_ms = g_frame_ms;
+  v.page = pageOf(current_screen);
+  v.dragging = T.down && T.sliding;
+  if (v.dragging) {
+    int dx = (int)T.x - T.x0;
+    if ((v.page == PAGE_SETTINGS && dx > 0) || (v.page == PAGE_RACE && dx < 0)) dx = dx * 3 / 10;  // rubber band
+    v.drag_px = (int16_t)dx;
   } else {
-    uiText(TR("Waiting for upload...", "Varakozas a feltoltesre..."), lx, 272, &FreeSans9pt7b, P->text_faint);
+    v.drag_px = 0;
   }
-
-  ensureWifiQr(g_ota);
-  drawWifiQr(R_WIFI_QR);
-}
-
-static void drawSettings(double odo) {
-  char right[24];
-  snprintf(right, sizeof(right), "FW %s", FW_VERSION);
-  drawTopBar(TR("SETTINGS", "BEALLITASOK"), &FreeSansBold12pt7b, P->accent, right, P->text_faint, 0);
-  drawTabs();
-  switch (active_submenu) {
-    case SUB_SYSTEM:   drawSettingsSystem(); break;
-    case SUB_SKIN:     drawSettingsSkin(); break;
-    case SUB_SPEED:    drawSettingsSpeed(); break;
-    case SUB_ODO:      drawSettingsOdo(odo); break;
-    case SUB_LANGUAGE: drawSettingsLang(); break;
-    case SUB_WIFI:     drawSettingsWifi(); break;
-    default: break;
-  }
-}
-
-// ================================================================================
-// 14. FIRMWARE UPDATE OVERLAY (any screen, input blocked)
-// ================================================================================
-
-static void drawOtaOverlay() {
-  if (g_ota.state == WEBOTA_SUCCESS) {
-    const int cx = 240, cy = 112;
-    uiCircle(cx, cy, 40, P->green);
-    uiThickLine(cx - 18, cy + 1, cx - 5, cy + 14, 7, P->on_accent);
-    uiThickLine(cx - 5, cy + 14, cx + 20, cy - 12, 7, P->on_accent);
-    uiText(TR("UPDATE OK", "FRISSITES KESZ"), 240, 176, &FreeSansBold18pt7b, P->green, AL_CENTER);
-    uiText(TR("Restarting...", "Ujraindul..."), 240, 220, &FreeSansBold12pt7b, P->text, AL_CENTER);
-    return;
-  }
-
-  uiText(TR("UPDATING FIRMWARE", "FIRMWARE FRISSITES"), 240, 36, &FreeSansBold18pt7b, P->text, AL_CENTER);
-  uiText(TR("Do not switch off the bike", "Ne kapcsold ki a motort!"), 240, 78, &FreeSansBold12pt7b, P->amber, AL_CENTER);
-
-  char b[32];
-  const Rect bar = {40, 206, 400, 24};
-  if (g_ota.bytes_total > 0) {
-    unsigned pct = g_ota.progress_pct > 100 ? 100 : g_ota.progress_pct;
-    snprintf(b, sizeof(b), "%u%%", pct);
-    uiBigText(b, 240, 118, P->accent, AL_CENTER);
-    uiProgress(bar, pct / 100.0f, P->accent);
-    snprintf(b, sizeof(b), "%.2f / %.2f MB", g_ota.bytes_written / 1048576.0f, g_ota.bytes_total / 1048576.0f);
-  } else {
-    // Unknown length: show bytes and an indeterminate sweep
-    snprintf(b, sizeof(b), "%lu", (unsigned long)(g_ota.bytes_written / 1024));
-    strlcat(b, " KB", sizeof(b));
-    uiBigText(b, 240, 118, P->accent, AL_CENTER);
-    uiRRect(bar, bar.h / 2, P->track);
-    const int seg = 100;
-    const int pos = (int)((g_frame_ms / 8) % (bar.w - seg));
-    uiRRect(bar.x + pos, bar.y, seg, bar.h, bar.h / 2, P->accent);
-    b[0] = 0;
-  }
-  if (b[0]) uiText(b, 240, 246, &FreeSans9pt7b, P->text_dim, AL_CENTER);
-  char fw[40];
-  snprintf(fw, sizeof(fw), "%s %s", TR("Current firmware", "Jelenlegi verzio"), FW_VERSION);
-  uiText(fw, 240, 280, &FreeSans9pt7b, P->text_faint, AL_CENTER);
-}
-
-// ================================================================================
-// 15. FRAME RENDER
-// ================================================================================
-
-static void renderUI() {
-  P = theme_light ? &PAL_LIGHT : &PAL_DARK;
-  ui_g->fillScreen(P->bg);
-
-  if (g_ota.state == WEBOTA_UPLOADING || g_ota.state == WEBOTA_SUCCESS) {
-    drawOtaOverlay();
-    display.flush();
-    return;
-  }
+  v.skin = (uint8_t)current_skin;
+  v.section = (uint8_t)active_submenu;
+  v.light = theme_light;
+  v.hu = current_lang == LANG_HU;
+  v.imperial = imp;
+  v.demo = demo_mode;
+  v.intro = g_intro_pending;
+  g_intro_pending = false;
 
   double odo, trip;
   portENTER_CRITICAL(&g_tel_mux);
   odo = g_odo_km;
   trip = g_trip_km;
   portEXIT_CRITICAL(&g_tel_mux);
+  v.speed = bike_speed_kmh * k;
+  v.full_scale = imp ? GAUGE_MAX_MPH : GAUGE_MAX_KMH;
+  v.gauge_tau_ms = speed_filter_oem ? 180.0f : 90.0f;
+  v.max_speed = session_max_speed * k;
+  v.ride_s = ride_seconds;
+  v.trip = trip * k;
+  v.odo = odo * k;
+  v.g = constrain((float)current_accel_g, 0.0f, 0.6f);
+  v.peak_g = g_peak_g;
+  memcpy(v.g_hist, g_hist, sizeof(v.g_hist));
 
-  switch (current_screen) {
-    case SCREEN_DASHBOARD: drawDashboard(odo, trip); break;
-    case SCREEN_RACE:      drawRace(); break;
-    case SCREEN_SETTINGS:  drawSettings(odo); break;
-    default: break;
+  // Race: results are shown only for the unit system they were measured in.
+  const AccelTimerState rs = accel_timer_state;
+  v.race_state = (uint8_t)rs;
+  v.race_target = imp ? 30.0f : 50.0f;
+  v.race_t = rs == ACCEL_FINISHED ? last_0_50_time : current_0_50_time;
+  v.race_t_done = rs == ACCEL_RUNNING && t_50_us != 0;
+  v.best = imp ? best_0_30mph_time : best_0_50_time;
+  const bool last_ok = last_run_imperial == imp;
+  v.last = last_ok ? last_0_50_time : 0.0f;
+  const bool run_ok = run_imperial == imp;
+  v.split[0] = run_ok ? split_50_60 : 0.0f;
+  v.split[1] = run_ok ? split_60_70 : 0.0f;
+  v.split[2] = run_ok ? split_70_80 : 0.0f;
+  v.total = run_ok ? time_0_80 : 0.0f;
+  v.new_best = !demo_mode && last_ok && v.best > 0.0f && fabsf(v.best - v.last) < 1e-6f &&
+               (rs == ACCEL_FINISHED || (rs == ACCEL_RUNNING && t_50_us != 0));
+
+  v.bright_pct = (uint8_t)brightPct(screen_brightness);
+  v.cal = speed_cal;
+  v.oem = speed_filter_oem;
+
+  v.ota = g_ota;
+  v.ota_view = g_ota.state == WEBOTA_UPLOADING ? OTA_PROGRESS
+             : g_ota.state == WEBOTA_SUCCESS   ? OTA_SUCCESS
+             : g_ota_err_overlay               ? OTA_ERROR
+                                               : OTA_NONE;
+
+  v.pressed = TGT_NONE;
+  if (T.down) {
+    if (uiPressed(T.target)) v.pressed = T.target;
+  } else if (g_tap_target != TGT_NONE && g_frame_ms - g_tap_ms < 120) {
+    v.pressed = g_tap_target;
   }
-  display.flush();
+  v.hold_max = uiHold(TGT_MAX_RESET);
+  v.hold_trip = uiHold(TGT_TRIP_RESET);
+  v.hold_odo = uiHold(TGT_ODO_RESET);
+  v.max_reset_ms = g_max_reset_ms;
+  v.trip_reset_ms = g_trip_reset_ms;
+  v.odo_reset_ms = g_odo_reset_ms;
+  v.bright_drag = T.down && T.target == TGT_BRIGHT;
+
+  // ---- debug console mock overrides (display only)
+  if (g_mock.on) {
+    v.max_speed = 74.0f * k;
+    v.ride_s = 42 * 60 + 18;
+    v.trip = 18.4;
+    v.odo = 1284.6;
+    v.peak_g = 0.52f;
+    mockGTrace(v.g_hist, ui::G_HIST, v.g);
+    v.bright_pct = 72;
+    v.cal = 1.04f;
+    v.oem = false;
+  }
+  if (g_mock.wifi && v.ota.state == WEBOTA_OFF) {
+    v.ota.state = WEBOTA_READY;
+    v.ota.clients = 1;
+    strlcpy(v.ota.ssid, "WheelieAssist-1A2B", sizeof(v.ota.ssid));
+    strlcpy(v.ota.password, "k7m2qx9vtp", sizeof(v.ota.password));
+    strlcpy(v.ota.ip, "192.168.4.1", sizeof(v.ota.ip));
+  }
+  if (g_mock.demo) v.demo = true;
+  if (g_mock.hold_max >= 0.0f) v.hold_max = g_mock.hold_max;
+  if (g_mock.hold_trip >= 0.0f) v.hold_trip = g_mock.hold_trip;
+  if (g_mock.hold_odo >= 0.0f) v.hold_odo = g_mock.hold_odo;
+  if (g_mock.race != MR_OFF) {
+    static const float SPLITS_A[4] = {0.88f, 1.05f, 1.41f, 6.92f};
+    static const float SPLITS_B[4] = {0.84f, 1.02f, 1.37f, 6.65f};
+    const float *sp = g_mock.race == MR_FINISHED ? SPLITS_B : SPLITS_A;
+    v.race_state = g_mock.race == MR_PULLING ? RACE_RUNNING
+                 : g_mock.race == MR_FINISHED ? RACE_FINISHED
+                 : g_mock.race == MR_STOP     ? RACE_WAIT_STOP
+                                              : RACE_READY;
+    v.race_t = g_mock.race == MR_PULLING ? 2.87f : (g_mock.race == MR_FINISHED ? 3.42f : 0.0f);
+    v.race_t_done = false;
+    v.best = g_mock.race == MR_FINISHED ? 3.42f : 3.58f;
+    v.last = g_mock.race == MR_FINISHED ? 3.42f : 3.71f;
+    v.new_best = g_mock.race == MR_FINISHED;
+    for (int i = 0; i < 3; i++) v.split[i] = g_mock.race == MR_PULLING ? 0.0f : sp[i];
+    v.total = g_mock.race == MR_PULLING ? 0.0f : sp[3];
+  }
+  if (g_mock.ota != OTA_NONE) {
+    v.ota_view = g_mock.ota;
+    v.ota.progress_pct = 64;
+    v.ota.bytes_written = 1268777;  // 1.21 MB
+    v.ota.bytes_total = 1981809;    // 1.89 MB
+    if (g_mock.ota == OTA_ERROR)
+      strlcpy(v.ota.error, "Invalid image — use the plain .bin, not -full.bin", sizeof(v.ota.error));
+  }
 }
 
 // ================================================================================
-// 16. UI & TELEMETRY TASK (core 1)
+// 11. DEBUG CONSOLE (app commands, see debug_console.h)
+// ================================================================================
+
+// UI state commands. Changes are not saved here (they persist only if
+// something else triggers a save). `mock ...` only changes what is displayed.
+static dbg::AppResult appDebugCommand(const char *cmd, const char *arg, Print &out) {
+  auto num = [&](long lo, long hi, long &v) {
+    char *e;
+    v = strtol(arg, &e, 10);
+    return e != arg && *e == 0 && v >= lo && v <= hi;
+  };
+  long v;
+  if (!strcmp(cmd, "screen")) {
+    if (!strcmp(arg, "dash")) current_screen = SCREEN_DASHBOARD;
+    else if (!strcmp(arg, "race")) current_screen = SCREEN_RACE;
+    else if (!strcmp(arg, "settings")) current_screen = SCREEN_SETTINGS;
+    else return dbg::APP_BAD_ARG;
+  } else if (!strcmp(cmd, "tab")) {
+    if (!num(0, SUB_COUNT - 1, v)) return dbg::APP_BAD_ARG;
+    active_submenu = (SettingsSubmenu)v;
+    current_screen = SCREEN_SETTINGS;
+  } else if (!strcmp(cmd, "skin")) {
+    if (!num(0, 3, v)) return dbg::APP_BAD_ARG;
+    current_skin = (ui::Skin)v;
+  } else if (!strcmp(cmd, "theme")) {
+    if (!strcmp(arg, "dark")) theme_light = false;
+    else if (!strcmp(arg, "light")) theme_light = true;
+    else return dbg::APP_BAD_ARG;
+  } else if (!strcmp(cmd, "lang")) {
+    if (!strcmp(arg, "en")) current_lang = LANG_EN;
+    else if (!strcmp(arg, "hu")) current_lang = LANG_HU;
+    else return dbg::APP_BAD_ARG;
+  } else if (!strcmp(cmd, "units")) {
+    if (!strcmp(arg, "metric")) imperial_mode = false;
+    else if (!strcmp(arg, "imperial")) imperial_mode = true;
+    else return dbg::APP_BAD_ARG;
+  } else if (!strcmp(cmd, "wifi")) {
+    if (!strcmp(arg, "on")) { if (!webOtaIsOn()) webOtaBegin(); }
+    else if (!strcmp(arg, "off")) { if (webOtaIsOn()) webOtaEnd(); }
+    else return dbg::APP_BAD_ARG;
+  } else if (!strcmp(cmd, "mock")) {
+    // mock off | on | wifi | demo | race <ready|pulling|finished|stop|off> |
+    //      ota <progress|success|error|off> | hold <max|trip|odo> <0..1|off> |
+    //      boot <ms|off>
+    char a0[12] = "", a1[12] = "", a2[12] = "";
+    sscanf(arg, "%11s %11s %11s", a0, a1, a2);
+    if (!strcmp(a0, "off")) {
+      g_mock = {false, false, false, MR_OFF, OTA_NONE, -1.0f, -1.0f, -1.0f, -1};
+    } else if (!strcmp(a0, "on")) {
+      g_mock.on = true;
+    } else if (!strcmp(a0, "wifi")) {
+      g_mock.on = g_mock.wifi = true;
+      g_mock.demo = false;
+    } else if (!strcmp(a0, "demo")) {
+      g_mock.on = g_mock.demo = true;
+      g_mock.wifi = false;
+    } else if (!strcmp(a0, "race")) {
+      static const char *const n[] = {"off", "ready", "pulling", "finished", "stop"};
+      int i = 0;
+      while (i < 5 && strcmp(a1, n[i])) i++;
+      if (i == 5) return dbg::APP_BAD_ARG;
+      g_mock.race = (uint8_t)i;
+    } else if (!strcmp(a0, "ota")) {
+      static const char *const n[] = {"off", "progress", "success", "error"};
+      int i = 0;
+      while (i < 4 && strcmp(a1, n[i])) i++;
+      if (i == 4) return dbg::APP_BAD_ARG;
+      g_mock.ota = (uint8_t)i;
+    } else if (!strcmp(a0, "boot")) {
+      long ms = -1;
+      if (strcmp(a1, "off") && (sscanf(a1, "%ld", &ms) != 1 || ms < 0 || ms > (long)ui::BOOT_MS))
+        return dbg::APP_BAD_ARG;
+      g_mock.boot = (int16_t)ms;
+    } else if (!strcmp(a0, "hold")) {
+      float p = -1.0f;
+      if (strcmp(a2, "off") && sscanf(a2, "%f", &p) != 1) return dbg::APP_BAD_ARG;
+      p = p < 0.0f ? -1.0f : constrain(p, 0.0f, 1.0f);
+      if (!strcmp(a1, "max")) g_mock.hold_max = p;
+      else if (!strcmp(a1, "trip")) g_mock.hold_trip = p;
+      else if (!strcmp(a1, "odo")) g_mock.hold_odo = p;
+      else return dbg::APP_BAD_ARG;
+    } else {
+      return dbg::APP_BAD_ARG;
+    }
+  } else if (!strcmp(cmd, "state")) {
+    static const char *const scr[] = {"boot", "settings", "dash", "race"};
+    out.printf("STATE screen=%s tab=%d skin=%d theme=%s lang=%s units=%s wifi=%s up=%lu\n",
+               scr[current_screen & 3], (int)active_submenu, (int)current_skin,
+               theme_light ? "light" : "dark", current_lang == LANG_HU ? "hu" : "en",
+               imperial_mode ? "imperial" : "metric", webOtaIsOn() ? "on" : "off",
+               (unsigned long)(millis() / 1000));
+  } else {
+    return dbg::APP_UNKNOWN;
+  }
+  return dbg::APP_OK;
+}
+
+// ================================================================================
+// 12. UI & TELEMETRY TASK (core 1)
 // ================================================================================
 
 void UITask(void *pvParameters) {
@@ -2001,9 +1411,10 @@ void UITask(void *pvParameters) {
   Serial.println("[UI] Initializing touch LCD...");
   display_initialized = display.begin();
   if (display_initialized) {
-    ui_g = display.gfx;
-    ui_g->setRotation(1);     // landscape for ALL drawing (see ui_gfx.h)
-    ui_g->setTextWrap(false);
+    display.gfx->setRotation(1);  // landscape (gfx draws in landscape coordinates)
+    gfx::begin(display.gfx->getFramebuffer());
+    if (!lcd::begin(display)) Serial.println("[UI] fast flush unavailable, using library flush");
+    ui::begin();
     Serial.println("[UI] Touch LCD initialized.");
   } else {
     Serial.println("[UI] Touch LCD init FAILED - running headless (telemetry only).");
@@ -2012,8 +1423,20 @@ void UITask(void *pvParameters) {
   pinMode(GFX_BL, OUTPUT);
   analogWrite(GFX_BL, screen_brightness);
 
-  if (display_initialized) drawBootScreen();
+  // Boot splash (~1.2 s, always dark), then the dashboard fades in with an
+  // ignition sweep of the gauge.
+  if (display_initialized) {
+    const uint32_t t0 = millis();
+    TickType_t wake = xTaskGetTickCount();
+    for (uint32_t t = 0; t <= ui::BOOT_MS; t = millis() - t0) {
+      ui::drawBoot(t);
+      lcd::present();
+      xTaskDelayUntil(&wake, pdMS_TO_TICKS(33));
+    }
+    g_intro_pending = true;
+  }
   current_screen = SCREEN_DASHBOARD;
+  dbg::begin(appDebugCommand, display_initialized ? display.gfx : nullptr);
 
   TickType_t last_wake = xTaskGetTickCount();
   uint32_t last_ms = millis();
@@ -2025,19 +1448,28 @@ void UITask(void *pvParameters) {
     last_ms = now_ms;
     g_frame_ms = now_ms;
 
+    dbg::poll();  // debug console commands (before telemetry: speed override)
     updateTelemetry(dt_ms);
+    updateGTelemetry();
     webOtaGetStatus(g_ota);
     const bool ota_busy = (g_ota.state == WEBOTA_UPLOADING || g_ota.state == WEBOTA_SUCCESS);
     static WebOtaState prev_ota_state = WEBOTA_OFF;
-    if (prev_ota_state == WEBOTA_UPLOADING && g_ota.state == WEBOTA_ERROR) {
-      current_screen = SCREEN_SETTINGS;  // failed upload: show the error on the WIFI tab
-      active_submenu = SUB_WIFI;
-    }
+    if (g_ota.state == WEBOTA_ERROR && prev_ota_state != WEBOTA_ERROR) g_ota_err_overlay = true;  // failed upload
+    if (g_ota.state == WEBOTA_OFF) g_ota_err_overlay = false;
     prev_ota_state = g_ota.state;
 
     if (display_initialized) {
-      handleTouch(ota_busy);
-      renderUI();
+      handleTouch(ota_busy || (g_mock.ota != OTA_NONE && g_mock.ota != OTA_ERROR));  // hit tests the shown layout
+      buildView(g_view);
+      const uint32_t t_draw = micros();
+      if (!dbg::render()) {  // `gfxtest` card replaces the UI
+        if (g_mock.boot >= 0) ui::drawBoot((uint32_t)g_mock.boot);
+        else ui::frame(g_view);
+      }
+      const uint32_t t_flush = micros();
+      dbg::frameRendered(t_flush - t_draw);  // serves `shot` before the flush
+      lcd::present();  // async: core 0 sends this frame, we draw the next one
+      dbg::frameFlushed(micros() - t_flush);
     }
     persistenceUpdate(now_ms, ota_busy);
 
@@ -2058,7 +1490,7 @@ void UITask(void *pvParameters) {
 }
 
 // ================================================================================
-// 17. SETUP / LOOP
+// 13. SETUP / LOOP
 // ================================================================================
 
 void setup() {
@@ -2072,6 +1504,8 @@ void setup() {
   memset(&eng, 0, sizeof(eng));
   memset(&T, 0, sizeof(T));
   memset(&g_ota, 0, sizeof(g_ota));
+  memset(&g_view, 0, sizeof(g_view));
+  g_view.page = PAGE_DASH;
   loadSettings();
 
   // Speed sensor ISR (attached from this task -> serviced on core 1)

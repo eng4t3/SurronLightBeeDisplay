@@ -4,7 +4,7 @@
 #define WHEELIE_VERSION_H
 
 #define FW_NAME       "WheelieAssist"
-#define FW_VERSION    "4.1.1"
+#define FW_VERSION    "4.2.0"
 #define FW_BUILD_DATE __DATE__ " " __TIME__
 
 // Where the phone downloads new firmware .bin files from.

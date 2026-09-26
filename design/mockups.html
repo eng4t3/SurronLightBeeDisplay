@@ -1,0 +1,1146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WheelieAssist UI Mockups</title>
+<style>
+@font-face { font-family: 'BSC'; src: url('../tools/fonts/BarlowSemiCondensed-Medium.ttf') format('truetype'); font-weight: 500; }
+@font-face { font-family: 'BSC'; src: url('../tools/fonts/BarlowSemiCondensed-SemiBold.ttf') format('truetype'); font-weight: 600; }
+@font-face { font-family: 'BSC'; src: url('../tools/fonts/BarlowSemiCondensed-Bold.ttf') format('truetype'); font-weight: 700; }
+:root { --bg:#0d0f12; --panel:#15181d; --line:#262b33; --tx:#d6dbe2; --dim:#8a94a3; --acc:#21C7FF; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--tx); font: 500 15px/1.45 'BSC', system-ui, sans-serif; }
+header { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: center;
+  padding: 12px 24px; background: rgba(13,15,18,.94); border-bottom: 1px solid var(--line); }
+header h1 { font: 700 20px 'BSC'; letter-spacing: .5px; margin: 0; }
+header h1 span { color: var(--acc); }
+header label { display: inline-flex; gap: 6px; align-items: center; color: var(--dim); cursor: pointer; }
+header button { font: 600 14px 'BSC'; background: #1d232b; color: var(--tx); border: 1px solid #2c3440; border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+header button:hover { border-color: var(--acc); }
+#status { color: var(--dim); font-size: 14px; }
+main { padding: 8px 24px 80px; }
+section h2 { font: 600 13px 'BSC'; letter-spacing: 2px; text-transform: uppercase; color: var(--dim); margin: 34px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+section p.note { color: var(--dim); max-width: 980px; margin: -4px 0 16px; }
+.grid { display: flex; flex-wrap: wrap; gap: 26px 26px; }
+figure { margin: 0; }
+figure canvas { display: block; width: 960px; height: 640px; image-rendering: pixelated; border-radius: 4px; box-shadow: 0 0 0 1px #262b33, 0 10px 30px rgba(0,0,0,.45); }
+body.x1 figure canvas { width: 480px; height: 320px; }
+figcaption { margin-top: 8px; display: flex; gap: 10px; align-items: baseline; }
+figcaption b { font-weight: 600; color: var(--tx); }
+figcaption code { color: var(--dim); font: 500 13px ui-monospace, Consolas, monospace; }
+.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; max-width: 1400px; }
+.sw { display: flex; gap: 10px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
+.sw i { width: 34px; height: 34px; border-radius: 6px; box-shadow: inset 0 0 0 1px rgba(128,128,128,.35); flex: none; }
+.sw div { font-size: 12.5px; line-height: 1.3; }
+.sw div b { display: block; font-size: 13px; }
+#warn { color: #FFB221; white-space: pre-wrap; font: 13px ui-monospace, Consolas, monospace; }
+</style>
+</head>
+<body>
+<header>
+  <h1>WheelieAssist <span>UI</span> · 480×320 mockups</h1>
+  <label><input type="checkbox" id="optQ" checked> RGB565 preview</label>
+  <label><input type="checkbox" id="optT"> touch targets</label>
+  <label><input type="checkbox" id="opt1x"> 1:1 size</label>
+  <button id="btnExport">Export PNGs + spec</button>
+  <span id="status"></span>
+</header>
+<main id="app">
+  <section><h2>Colour tokens (snapped to RGB565)</h2><div class="swatches" id="swatches"></div><div id="warn"></div></section>
+</main>
+<script>
+'use strict';
+/* =====================================================================================
+   WheelieAssist UI — design mockups.
+   Everything is drawn with primitives that map 1:1 to the AA engine:
+     rrect / rrectStroke / rrectVGrad / circle / ring / arc (+angle gradient, round caps)
+     capsule / poly (convex) / glow (radial falloff) / vignette / text (4-bit AA, tracking,
+     tabular digits) / icon (4bpp mask).
+   Angles: compass degrees — 0° = 12 o'clock, positive = clockwise.
+   Text y = BASELINE. Text x = anchor (left / center / right edge of ink-advance box).
+   ===================================================================================== */
+const W = 480, H = 320;
+
+/* ------------------------------------------------------------------ colour tokens */
+const THEMES = {
+  dark: {
+    bg: '#080C10', surface: '#101418', surface_hi: '#181C21', border: '#212831', track: '#182029',
+    text_hi: '#F7FBFF', text: '#D6DBDE', text_dim: '#8C9AA5', text_faint: '#525D6B',
+    accent: '#21C7FF', on_accent: '#001018', green: '#31D784', amber: '#FFB221', red: '#FF5152',
+    on_amber: '#181000', face: '#101418', metal_hi: '#C6CBD6', metal_lo: '#39414A', qr_bg: '#FFFFFF', qr_fg: '#000000',
+    shadow: '#000000',
+  },
+  light: {
+    bg: '#EFF3F7', surface: '#FFFFFF', surface_hi: '#E7EBEF', border: '#CED3DE', track: '#DEE3E7',
+    text_hi: '#000408', text: '#182431', text_dim: '#4A5563', text_faint: '#8C96A5',
+    accent: '#0079C6', on_accent: '#FFFFFF', green: '#089A4A', amber: '#C67500', red: '#D62439',
+    on_amber: '#FFFFFF', face: '#FFFFFF', metal_hi: '#EFF3F7', metal_lo: '#94A2AD', qr_bg: '#FFFFFF', qr_fg: '#000000',
+    shadow: '#4A5563',
+  },
+};
+const TOKEN_DOC = {
+  bg: 'Screen background', surface: 'Cards, tiles, panels', surface_hi: 'Pressed / raised / inactive knob',
+  border: 'Hairlines, card strokes', track: 'Gauge / slider / bar tracks, unlit segments',
+  text_hi: 'Hero numbers, primary values', text: 'Body text', text_dim: 'Labels, units, secondary',
+  text_faint: 'Decorative / disabled only (never info)', accent: 'Primary accent, speed zone 1, selection',
+  on_accent: 'Text/icons on accent fills', green: 'OK / ready / success', amber: 'Speed zone 2, best, warnings',
+  red: 'Speed zone 3, destructive, errors', on_amber: 'Text on amber (DEMO badge)', face: 'CHRONO dial face',
+  metal_hi: 'CHRONO bezel highlight', metal_lo: 'CHRONO bezel shadow', qr_bg: 'QR quiet zone (both themes)',
+  qr_fg: 'QR modules', shadow: 'Shadow base (used with alpha)',
+};
+const GLOW_K = { dark: 1, light: 0.55 };      // glow alpha multiplier per theme
+let THEME = 'dark', T = THEMES.dark, LANG = 'en';
+const tr = (en, hu) => (LANG === 'hu' ? hu : en);
+
+function to565(hex) {
+  const n = parseInt(hex.slice(1), 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+  return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+}
+function from565(v) {
+  const r = v >> 11, g = (v >> 5) & 63, b = v & 31;
+  const R = (r << 3) | (r >> 2), G = (g << 2) | (g >> 4), B = (b << 3) | (b >> 2);
+  return '#' + [R, G, B].map(x => x.toString(16).padStart(2, '0')).join('').toUpperCase();
+}
+const hex565 = v => '0x' + v.toString(16).toUpperCase().padStart(4, '0');
+const WARN = [];
+for (const [tn, th] of Object.entries(THEMES)) for (const [k, v] of Object.entries(th))
+  if (from565(to565(v)) !== v.toUpperCase()) WARN.push(`${tn}.${k} ${v} is not exact RGB565 (-> ${from565(to565(v))})`);
+
+function C(c, a = 1) {
+  const hex = c[0] === '#' ? c : T[c];
+  if (!hex) throw new Error('unknown colour ' + c);
+  if (a >= 1) return hex;
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`;
+}
+function mix(c1, c2, t) {
+  const a = parseInt(C(c1).slice(1), 16), b = parseInt(C(c2).slice(1), 16);
+  const ch = s => Math.round(((a >> s) & 255) * (1 - t) + ((b >> s) & 255) * t);
+  return '#' + [ch(16), ch(8), ch(0)].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+
+/* speed zones — fraction of gauge full scale (85 km/h / 50 mph) */
+const ZONE = { z2: 0.60, z3: 0.85 };            // flat colour thresholds
+const ZONE_GRAD = [[0, 'accent'], [0.50, 'accent'], [0.72, 'amber'], [0.86, 'amber'], [0.97, 'red'], [1, 'red']];
+const zoneTok = p => (p < ZONE.z2 ? 'accent' : p < ZONE.z3 ? 'amber' : 'red');
+
+/* ------------------------------------------------------------------ fonts */
+const FONTS = {
+  LABEL:   { w: 600, s: 13,  track: 1.5, upper: true, file: 'SemiBold' },
+  SMALL:   { w: 500, s: 15,  track: 0,   file: 'Medium' },
+  BODY:    { w: 500, s: 18,  track: 0,   file: 'Medium' },
+  BODYB:   { w: 600, s: 18,  track: 0,   file: 'SemiBold' },
+  TITLE:   { w: 600, s: 24,  track: 0,   file: 'SemiBold' },
+  NUM_M:   { w: 700, s: 32,  track: 0,   tab: true, file: 'Bold' },
+  NUM_L:   { w: 700, s: 56,  track: 0,   tab: true, file: 'Bold', glyphs: '0123456789.:-%+ ' },
+  NUM_XL:  { w: 700, s: 128, track: -2,  tab: true, file: 'Bold', glyphs: '0123456789.:-%+ ' },
+  NUM_XXL: { w: 700, s: 168, track: -4,  tab: true, file: 'Bold', glyphs: '0123456789' },
+};
+let g;                                   // current 2D context (480x320)
+const advCache = {};
+function fontCss(f) { return `${f.w} ${f.s}px BSC`; }
+function adv(f, ch) {
+  const k = f.w + '/' + f.s + '/' + ch;
+  if (!(k in advCache)) { g.font = fontCss(f); advCache[k] = Math.round(g.measureText(ch).width); }
+  return advCache[k];
+}
+function digitCell(f) { let m = 0; for (const d of '0123456789') m = Math.max(m, adv(f, d)); return m; }
+function layout(str, f, track) {
+  const cell = f.tab ? digitCell(f) : 0;
+  let x = 0; const items = [];
+  for (const ch of str) {
+    const isD = f.tab && ch >= '0' && ch <= '9';
+    const a = isD ? cell : adv(f, ch);
+    items.push({ ch, x: x + (isD ? Math.round((cell - adv(f, ch)) / 2) : 0) });
+    x += a + track;
+  }
+  return { w: items.length ? x - track : 0, items };
+}
+function tw(str, font, track) {
+  const f = FONTS[font]; if (f.upper) str = str.toUpperCase();
+  return layout(str, f, track ?? f.track).w;
+}
+
+/* ------------------------------------------------------------------ spec recorder */
+let REC = null, TOUCH = [], SHOW_TOUCH = false;
+const r1 = v => Math.round(v * 10) / 10;
+function cn(c, a) { return '`' + c + '`' + (a != null && a < 1 ? ` @${Math.round(a * 100)}%` : ''); }
+function rec(id, o) { if (REC && id) REC.push({ id, ...o }); }
+function note(id, text) { rec(id, { p: 'note', g: '', c: '', n: text }); }
+
+/* ------------------------------------------------------------------ primitives */
+const rad = d => (d - 90) * Math.PI / 180;
+const polar = (cx, cy, r, d) => [cx + r * Math.cos(rad(d)), cy + r * Math.sin(rad(d))];
+
+function rrPath(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+function rrect(id, x, y, w, h, r, c, a = 1, n) {
+  g.fillStyle = C(c, a); rrPath(x, y, w, h, r); g.fill();
+  rec(id, { p: 'rrect', g: `x=${x} y=${y} w=${w} h=${h} r=${r}`, c: cn(c, a), n });
+}
+function rrectStroke(id, x, y, w, h, r, c, lw = 1, a = 1, n) {   // stroke drawn INSIDE the rect
+  g.strokeStyle = C(c, a); g.lineWidth = lw; rrPath(x + lw / 2, y + lw / 2, w - lw, h - lw, Math.max(0, r - lw / 2)); g.stroke();
+  rec(id, { p: `rrect stroke ${lw}px (inside)`, g: `x=${x} y=${y} w=${w} h=${h} r=${r}`, c: cn(c, a), n });
+}
+function rrectVGrad(id, x, y, w, h, r, c0, c1, n) {
+  const gr = g.createLinearGradient(0, y, 0, y + h); gr.addColorStop(0, C(c0)); gr.addColorStop(1, C(c1));
+  g.fillStyle = gr; rrPath(x, y, w, h, r); g.fill();
+  rec(id, { p: 'rrect v-gradient', g: `x=${x} y=${y} w=${w} h=${h} r=${r}`, c: `${cn(c0)} → ${cn(c1)}`, n });
+}
+function rect(id, x, y, w, h, c, a = 1, n) {
+  g.fillStyle = C(c, a); g.fillRect(x, y, w, h);
+  rec(id, { p: 'rect', g: `x=${x} y=${y} w=${w} h=${h}`, c: cn(c, a), n });
+}
+function hline(id, x, y, w, c = 'border', a = 1) { g.fillStyle = C(c, a); g.fillRect(x, y, w, 1); rec(id, { p: 'hline 1px', g: `x=${x} y=${y} w=${w}`, c: cn(c, a) }); }
+function vline(id, x, y, h, c = 'border', a = 1) { g.fillStyle = C(c, a); g.fillRect(x, y, 1, h); rec(id, { p: 'vline 1px', g: `x=${x} y=${y} h=${h}`, c: cn(c, a) }); }
+function circle(id, cx, cy, r, c, a = 1, n) {
+  g.fillStyle = C(c, a); g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.fill();
+  rec(id, { p: 'circle', g: `c=(${r1(cx)},${r1(cy)}) r=${r}`, c: cn(c, a), n });
+}
+function ring(id, cx, cy, r, lw, c, a = 1, n) {           // r = centre-line radius
+  g.strokeStyle = C(c, a); g.lineWidth = lw; g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.stroke();
+  rec(id, { p: 'ring', g: `c=(${r1(cx)},${r1(cy)}) r=${r} th=${lw}`, c: cn(c, a), n });
+}
+/* arc: centre-line radius r, thickness th, from d0 to d1 (compass deg, clockwise).
+   o.grad = [[p, token]...] positions p along the FULL sweep (o.a0 .. o.a0+o.sweep), angle-dependent colour.
+   Caps take the colour of the nearest arc end. */
+function arc(id, cx, cy, r, th, d0, d1, c, o = {}) {
+  if (d1 - d0 < 0.01 && o.caps !== 'butt') { // zero-length -> round dot
+    const [x, y] = polar(cx, cy, r, d0); g.fillStyle = o.grad ? C(o.grad[0][1]) : C(c, o.a ?? 1);
+    g.beginPath(); g.arc(x, y, th / 2, 0, 7); g.fill();
+  } else {
+    g.save(); g.lineWidth = th; g.lineCap = o.caps || 'round';
+    if (o.grad) {
+      const lead = Math.min(25, (360 - o.sweep) / 2), cg = g.createConicGradient(rad(o.a0 - lead), cx, cy);
+      cg.addColorStop(0, C(o.grad[0][1]));
+      for (const [p, t] of o.grad) cg.addColorStop((lead + p * o.sweep) / 360, C(t, o.a ?? 1));
+      cg.addColorStop(1, C(o.grad[o.grad.length - 1][1]));
+      g.strokeStyle = cg;
+    } else g.strokeStyle = C(c, o.a ?? 1);
+    g.beginPath(); g.arc(cx, cy, r, rad(d0), rad(d1)); g.stroke(); g.restore();
+  }
+  const gs = o.grad ? 'angle-gradient ' + o.grad.map(([p, t]) => `${Math.round(p * 100)}%:${t}`).join(' ') + ` over ${o.a0}°..${o.a0 + o.sweep}°` : cn(c, o.a);
+  rec(id, { p: `arc (${o.caps || 'round'} caps)`, g: `c=(${cx},${cy}) r=${r} th=${th} ${r1(d0)}°→${r1(d1)}°`, c: gs, n: o.n });
+}
+function capsule(id, x0, y0, x1, y1, w, c, a = 1, n) {
+  g.save(); g.strokeStyle = C(c, a); g.lineWidth = w; g.lineCap = 'round';
+  g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); g.restore();
+  rec(id, { p: 'capsule', g: `(${r1(x0)},${r1(y0)})→(${r1(x1)},${r1(y1)}) w=${w}`, c: cn(c, a), n });
+}
+function hcapsule(id, x, y, w, th, c, a = 1, n) {        // horizontal capsule, x..x+w, centred on y
+  if (w <= th) { circle(null, x + th / 2, y, th / 2, c, a); } else capsule(null, x + th / 2, y, x + w - th / 2, y, th, c, a);
+  rec(id, { p: 'capsule (h)', g: `x=${r1(x)} y=${r1(y)} w=${r1(w)} th=${th}`, c: cn(c, a), n });
+}
+function poly(id, pts, c, a = 1, n) {
+  g.fillStyle = C(c, a); g.beginPath(); pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.closePath(); g.fill();
+  rec(id, { p: 'poly (convex)', g: pts.map(([x, y]) => `(${r1(x)},${r1(y)})`).join(' '), c: cn(c, a), n });
+}
+/* radial glow: alpha(d) = A * (1 - d/r)^2 */
+function glow(id, cx, cy, r, c, A, n) {
+  A *= GLOW_K[THEME];
+  const gr = g.createRadialGradient(cx, cy, 0, cx, cy, r);
+  for (let i = 0; i <= 8; i++) { const t = i / 8; gr.addColorStop(t, C(c, A * (1 - t) * (1 - t))); }
+  g.fillStyle = gr; g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill();
+  rec(id, { p: 'glow', g: `c=(${r1(cx)},${r1(cy)}) r=${r}`, c: `${cn(c)} A=${r1(A / GLOW_K[THEME] * 100)}% (light ×${GLOW_K.light})`, n: n || 'alpha = A·(1−d/r)²' });
+}
+function text(id, str, font, x, y, align, c, o = {}) {
+  const f = FONTS[font]; if (f.upper) str = str.toUpperCase();
+  const track = o.track ?? f.track;
+  if (f.glyphs) for (const ch of str) if (!f.glyphs.includes(ch)) WARN.push(`glyph '${ch}' not in ${font}: "${str}"`);
+  const L = layout(str, f, track);
+  let x0 = align === 'center' ? x - L.w / 2 : align === 'right' ? x - L.w : x;
+  x0 = Math.round(x0);
+  g.font = fontCss(f); g.fillStyle = C(c, o.a ?? 1); g.textBaseline = 'alphabetic'; g.textAlign = 'left';
+  for (const it of L.items) g.fillText(it.ch, x0 + it.x, y);
+  rec(id, { p: 'text', g: `${align || 'left'} x=${x} base=${y}` + (track !== f.track ? ` track=${track}` : ''), c: cn(c, o.a), f: font, t: str, n: o.n });
+  return { x0, w: L.w };
+}
+/* text with trailing unit in a second font, the pair aligned as one block */
+function valUnit(id, val, vf, unit, uf, x, y, align, vc = 'text_hi', uc = 'text_dim', gap = 5) {
+  const wv = tw(val, vf), wu = unit ? tw(unit, uf) : 0, wt = wv + (unit ? gap + wu : 0);
+  const x0 = align === 'center' ? x - wt / 2 : align === 'right' ? x - wt : x;
+  text(id && id + '.value', val, vf, Math.round(x0), y, 'left', vc, { n: `block ${align || 'left'}-aligned at x=${x} (value+${gap}px+unit)` });
+  if (unit) text(id && id + '.unit', unit, uf, Math.round(x0 + wv + gap), y, 'left', uc);
+  return wt;
+}
+function touch(id, x, y, w, h, action) {
+  TOUCH.push({ id, x, y, w, h, action });
+  if (REC && id) REC.push({ id, p: 'TOUCH', g: `x=${x} y=${y} w=${w} h=${h}`, c: '', n: action });
+}
+function drawTouchOverlay() {
+  for (const t of TOUCH) {
+    g.save(); g.fillStyle = 'rgba(255,0,200,.16)'; g.strokeStyle = 'rgba(255,0,200,.9)'; g.lineWidth = 1;
+    g.fillRect(t.x, t.y, t.w, t.h); g.strokeRect(t.x + .5, t.y + .5, t.w - 1, t.h - 1);
+    g.font = '600 10px BSC'; g.fillStyle = '#ff40d0'; g.fillText(`${t.w}×${t.h}`, t.x + 3, t.y + 11); g.restore();
+  }
+}
+
+/* ------------------------------------------------------------------ icons (pre-rendered 4bpp masks) */
+const ICONS = {
+  wifi(s) { s.dot(10, 15.2, 1.9); s.arc(10, 15.2, 5.4, -46, 46); s.arc(10, 15.2, 10, -46, 46); },
+  system(s) { s.line(3, 5, 17, 5); s.line(3, 10, 17, 10); s.line(3, 15, 17, 15); s.knob(12.5, 5); s.knob(6.5, 10); s.knob(14, 15); },
+  skin(s) { s.rr(2.5, 2.5, 6.5, 6.5, 1.8); s.rr(11, 2.5, 6.5, 6.5, 1.8); s.rr(2.5, 11, 6.5, 6.5, 1.8); s.rrf(11, 11, 6.5, 6.5, 1.8); },
+  speed(s) { s.arc(10, 11.5, 7.5, -125, 125); s.line(10, 11.5, 14.2, 7.3); s.dot(10, 11.5, 2.2); },
+  odo(s) { s.rr(1.8, 5, 16.4, 10, 2.4); s.line(7.3, 5.8, 7.3, 14.2); s.line(12.7, 5.8, 12.7, 14.2); },
+  lang(s) { s.circ(10, 10, 7.6); s.line(2.6, 10, 17.4, 10); s.ell(10, 10, 3.4, 7.6); },
+  reset(s) { s.arc(10, 10.5, 6.6, 20, 300); s.tri([[3.2, 2.2], [9.2, 3.6], [4.6, 8.6]]); },
+  check(s) { s.poly([[4, 10.5], [8.2, 14.6], [16, 6.4]]); },
+  warn(s) { s.tri([[10, 2.5], [18, 16.8], [2, 16.8]]); s.cut(10, 7.2, 10, 11.6, 2.2); s.cutdot(10, 14.2, 1.3); },
+  sun(s) { s.dot(10, 10, 3.6); for (let i = 0; i < 8; i++) { const a = i * 45, [x0, y0] = polar(10, 10, 6.3, a), [x1, y1] = polar(10, 10, 8.3, a); s.line(x0, y0, x1, y1); } },
+  moon(s) { s.moon(); },
+  phone(s) { s.rr(5.5, 2, 9, 16, 2.2); s.line(8.6, 15, 11.4, 15); },
+  bolt(s) { s.tri([[11.5, 1.5], [4.5, 11.5], [10, 11.5]]); s.tri([[8.5, 18.5], [15.5, 8.5], [10, 8.5]]); },
+};
+function icon(id, name, x, y, size, c, a = 1) {
+  const k = size / 20, col = C(c, a);
+  g.save(); g.translate(x, y); g.scale(k, k);
+  g.strokeStyle = col; g.fillStyle = col; g.lineWidth = 1.9; g.lineCap = 'round'; g.lineJoin = 'round';
+  const s = {
+    dot: (cx, cy, r) => { g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill(); },
+    circ: (cx, cy, r) => { g.beginPath(); g.arc(cx, cy, r, 0, 7); g.stroke(); },
+    arc: (cx, cy, r, d0, d1) => { g.beginPath(); g.arc(cx, cy, r, rad(d0), rad(d1)); g.stroke(); },
+    line: (a, b, c2, d) => { g.beginPath(); g.moveTo(a, b); g.lineTo(c2, d); g.stroke(); },
+    knob: (cx, cy) => { g.save(); g.globalCompositeOperation = 'destination-out'; g.beginPath(); g.arc(cx, cy, 3.6, 0, 7); g.fill(); g.restore(); g.beginPath(); g.arc(cx, cy, 2.3, 0, 7); g.fill(); },
+    rr: (a, b, w, h, r) => { rrPath(a, b, w, h, r); g.stroke(); },
+    rrf: (a, b, w, h, r) => { rrPath(a - .95, b - .95, w + 1.9, h + 1.9, r + .9); g.fill(); },
+    ell: (cx, cy, rx, ry) => { g.beginPath(); g.ellipse(cx, cy, rx, ry, 0, 0, 7); g.stroke(); },
+    tri: (p) => { g.beginPath(); p.forEach(([a, b], i) => (i ? g.lineTo(a, b) : g.moveTo(a, b))); g.closePath(); g.fill(); g.stroke(); },
+    poly: (p) => { g.beginPath(); p.forEach(([a, b], i) => (i ? g.lineTo(a, b) : g.moveTo(a, b))); g.lineWidth = 2.4; g.stroke(); },
+    cut: (a, b, c2, d, w) => { g.save(); g.globalCompositeOperation = 'destination-out'; g.lineWidth = w; g.beginPath(); g.moveTo(a, b); g.lineTo(c2, d); g.stroke(); g.restore(); },
+    cutdot: (cx, cy, r) => { g.save(); g.globalCompositeOperation = 'destination-out'; g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill(); g.restore(); },
+    moon: () => { g.beginPath(); g.arc(10, 10, 7.2, 0, 7); g.fill(); g.save(); g.globalCompositeOperation = 'destination-out'; g.beginPath(); g.arc(14, 6.4, 6.2, 0, 7); g.fill(); g.restore(); },
+  };
+  // icons that punch holes must render on their own layer
+  const needsLayer = ['system', 'warn', 'moon'].includes(name);
+  if (needsLayer) {
+    const oc = document.createElement('canvas'); oc.width = oc.height = Math.ceil(size) + 2;
+    const og = oc.getContext('2d'); const saved = g; g.restore(); g = og;
+    g.save(); g.translate(1, 1); g.scale(k, k); g.strokeStyle = col; g.fillStyle = col; g.lineWidth = 1.9; g.lineCap = 'round'; g.lineJoin = 'round';
+    ICONS[name](s); g.restore(); g = saved; g.drawImage(oc, x - 1, y - 1);
+  } else { ICONS[name](s); g.restore(); }
+  rec(id, { p: 'icon', g: `${name} ${size}px at x=${x} y=${y} (top-left)`, c: cn(c, a) });
+}
+
+/* ------------------------------------------------------------------ sample ride data */
+const RIDE = { max: 74, ride: '42:18', trip: '18.4', odo: '1 284', odoFull: '1 284.6', peakG: 0.52 };
+const G_AT = { 0: 0.00, 35: 0.31, 48: 0.24, 72: 0.12 };
+function gTrace(n, end) {        // deterministic launch trace, newest last
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    let v = t < 0.18 ? 0.02 : 0.02 + 0.5 * Math.pow(Math.sin(Math.min(1, (t - 0.18) / 0.5) * Math.PI / 2), 0.7) * Math.exp(-Math.max(0, t - 0.55) * 3);
+    v += 0.025 * Math.sin(i * 1.9) * (t > 0.2 ? 1 : 0.3);
+    out.push(Math.max(0, Math.min(0.6, v)));
+  }
+  out[n - 1] = end; out[n - 2] = (out[n - 3] + end) / 2;
+  return out;
+}
+
+/* ------------------------------------------------------------------ chrome: top bar */
+const TB = { h: 30, dotY: 15, dotW: 6, dotActive: 18, dotGap: 8, titleX: 16, titleBase: 20, rightX: 464 };
+function topBar(page, title, st = {}) {
+  const ws = [0, 1, 2].map(i => (i === page ? TB.dotActive : TB.dotW));
+  let x = 240 - (ws[0] + ws[1] + ws[2] + 2 * TB.dotGap) / 2;
+  for (let i = 0; i < 3; i++) {
+    hcapsule(i === page ? 'chrome.pageDotActive' : (i === 0 ? 'chrome.pageDot' : null), x, TB.dotY, ws[i], 6, i === page ? 'accent' : 'text_faint', 1,
+      i === page ? `active page: ${TB.dotActive}×6 capsule` : `inactive: 6×6 dot; row centred on x=240, gap ${TB.dotGap}`);
+    x += ws[i] + TB.dotGap;
+  }
+  if (title) text('chrome.title', title, 'LABEL', TB.titleX, TB.titleBase, 'left', 'text_dim');
+  let rx = TB.rightX;
+  if (st.wifi) { icon('chrome.wifi', 'wifi', rx - 18, 6, 18, 'accent'); rx -= 18 + 12; }
+  if (st.demo) {
+    const bw = Math.round(tw('DEMO', 'LABEL')) + 16;
+    rrect('chrome.demoBadge', rx - bw, 5, bw, 20, 10, 'amber', 1, 'pill, width = text + 16');
+    text('chrome.demoText', 'DEMO', 'LABEL', rx - bw / 2, 20, 'center', 'on_amber');
+  }
+}
+
+/* ------------------------------------------------------------------ shared components */
+function holdRing(id, cx, cy, p, c = 'accent') {
+  ring(id && id + '.track', cx, cy, 7, 3, 'track');
+  if (p > 0) arc(id && id + '.fill', cx, cy, 7, 3, 0, 360 * p, c, { n: 'end angle = 360°·progress' });
+}
+/* label + (optional hold ring) — returns nothing; draws LABEL text */
+function statLabel(id, label, x, y, align, hold, c = 'text_dim') {
+  const t = text(id, label, 'LABEL', x, y, align, hold != null ? 'accent' : c);
+  if (hold != null) {
+    const hx = align === 'right' ? t.x0 - 14 : t.x0 + t.w + 14;
+    holdRing(id + '.hold', hx, y - 4.5, hold);
+  }
+}
+function card(id, x, y, w, h, o = {}) {
+  rrect(id, x, y, w, h, o.r ?? 14, o.fill ?? 'surface');
+  if (o.stroke !== false) rrectStroke(id && id + '.stroke', x, y, w, h, o.r ?? 14, o.strokeC ?? 'border', o.lw ?? 1, o.strokeA ?? 1);
+}
+function seg(id, x, y, w, h, opts, sel) {       // segmented control
+  rrect(id, x, y, w, h, 12, 'bg');
+  rrectStroke(id && id + '.stroke', x, y, w, h, 12, 'border');
+  const sw = w / opts.length;
+  opts.forEach((o, i) => {
+    const sx = x + i * sw;
+    if (i === sel) rrect(id && id + '.sel', Math.round(sx + 4), y + 4, Math.round(sw - 8), h - 8, 9, 'accent');
+    text(id && id + '.opt' + i, o, 'BODYB', Math.round(sx + sw / 2), y + h / 2 + 6, 'center', i === sel ? 'on_accent' : 'text_dim');
+    touch(id && id + '.t' + i, Math.round(sx), y, Math.round(sw), h, 'select "' + o + '"');
+  });
+}
+function toggle(id, x, y, on) {                // 68x40
+  rrect(id, x, y, 68, 40, 20, on ? 'accent' : 'track');
+  if (!on) rrectStroke(id && id + '.stroke', x, y, 68, 40, 20, 'border');
+  circle(id && id + '.knobShadow', on ? x + 48 : x + 20, y + 21.5, 16, 'shadow', 0.25);
+  circle(id && id + '.knob', on ? x + 48 : x + 20, y + 20, 15, on ? 'on_accent' : 'text_dim', 1, 'knob animates x over 160 ms ease-out');
+  if (on && THEME === 'dark') circle(null, x + 48, y + 20, 15, 'text_hi');
+  if (on && THEME === 'light') circle(null, x + 48, y + 20, 15, 'surface');
+}
+function chamfer(x, y, w, h, c) { return [[x + c, y], [x + w, y], [x + w, y + h - c], [x + w - c, y + h], [x, y + h], [x, y + c]]; }
+function chamferPanel(id, x, y, w, h, c, fill = 'surface', stroke = 'border') {
+  poly(id && id + '.edge', chamfer(x, y, w, h, c), stroke);
+  poly(id, chamfer(x + 1, y + 1, w - 2, h - 2, c - 0.4), fill, 1, 'outer poly in `border`, inner poly inset 1px in fill = 1px stroke');
+}
+
+/* =====================================================================================
+   DASHBOARD SKINS
+   ===================================================================================== */
+function dashData(spd, o = {}) {
+  return { spd, pct: Math.min(1, spd / 85), max: RIDE.max, maxPct: RIDE.max / 85, ride: RIDE.ride, trip: RIDE.trip, odo: RIDE.odo,
+    g: G_AT[spd] ?? 0.2, peakG: RIDE.peakG, tripHold: o.tripHold, maxHold: o.maxHold };
+}
+const U = () => ({ spd: tr('KM/H', 'KM/H'), dist: 'km' });
+
+/* ---------- 1. HALO — premium ring + spec sheet ---------- */
+const HALO = { cx: 150, cy: 176, R: 118, TH: 18, A0: -135, SW: 270, innerR: 99, tickR0: 132, tickR1: 142, minorR0: 137, minorR1: 142,
+  numBase: 211, unitBase: 243, colX: 306, rowY: 38, rowH: 70, labelDy: 26, valueDy: 61 };
+function skinHalo(v) {
+  const K = HALO, { cx, cy, R, TH, A0, SW } = K;
+  // ticks (outside the ring)
+  for (let k = 0; k <= 85; k += 5) {
+    const d = A0 + SW * k / 85, major = k % 10 === 0;
+    const [x0, y0] = polar(cx, cy, major ? K.tickR0 : K.minorR0, d), [x1, y1] = polar(cx, cy, major ? K.tickR1 : K.minorR1, d);
+    capsule(null, x0, y0, x1, y1, major ? 2 : 1.5, major ? 'text_dim' : 'text_faint');
+  }
+  note('halo.ticks', `every 5 km/h (every 5 mph imperial, scale 0..50): minor capsule w=1.5 r ${K.minorR0}..${K.minorR1} \`text_faint\`; every 10: major capsule w=2 r ${K.tickR0}..${K.tickR1} \`text_dim\`. angle = ${A0}° + ${SW}°·v/85`);
+  arc('halo.track', cx, cy, R, TH, A0, A0 + SW, 'track');
+  ring('halo.innerLine', cx, cy, K.innerR, 1, 'border');
+  const dv = A0 + SW * v.pct;
+  arc('halo.value', cx, cy, R, TH, A0, dv, null, { grad: ZONE_GRAD, a0: A0, sweep: SW, n: 'end = A0 + 270°·pct; drawn even at 0 (dot)' });
+  const [tx, ty] = polar(cx, cy, R, dv);
+  if (v.pct > 0) glow('halo.tipGlow', tx, ty, 34, zoneTok(v.pct), 0.55, 'colour = flat zone colour of pct');
+  circle('halo.tipDot', tx, ty, 4.5, 'text_hi', 1, 'comet head at arc end');
+  // max tell-tale (outside ticks)
+  const dm = A0 + SW * v.maxPct, [m0x, m0y] = polar(cx, cy, 106, dm), [mlx, mly] = polar(cx, cy, 98, dm - 3.6), [mrx, mry] = polar(cx, cy, 98, dm + 3.6);
+  poly('halo.maxMark', [[m0x, m0y], [mlx, mly], [mrx, mry]], 'amber', 1, 'tell-tale: tip r=106 (pointing at the ring), base r=98 ±3.6°, at session-max angle');
+  // speed
+  text('halo.speed', String(v.spd), 'NUM_XL', cx, K.numBase, 'center', 'text_hi');
+  text('halo.unit', U().spd, 'LABEL', cx, K.unitBase, 'center', 'text_dim');
+  // spec sheet column
+  const rows = [
+    { id: 'max', l: tr('MAX', 'MAX'), v: String(v.max), u: 'km/h', hold: v.maxHold },
+    { id: 'ride', l: tr('RIDE TIME', 'MENETIDŐ'), v: v.ride, u: '' },
+    { id: 'trip', l: tr('TRIP', 'ÚT'), v: v.trip, u: 'km', hold: v.tripHold },
+    { id: 'odo', l: tr('ODO', 'ÖSSZES'), v: v.odo, u: 'km' },
+  ];
+  rows.forEach((r, i) => {
+    const y = K.rowY + i * K.rowH;
+    if (i) hline('halo.sep' + i, K.colX, y, 464 - K.colX, 'border');
+    statLabel('halo.' + r.id + '.label', r.l, K.colX, y + K.labelDy, 'left', r.hold);
+    if (r.id === 'max') { const t = tw(r.l, 'LABEL'); poly('halo.max.mark', [[K.colX + t + 8, y + K.labelDy - 9], [K.colX + t + 16, y + K.labelDy - 9], [K.colX + t + 12, y + K.labelDy - 2]], r.hold != null ? 'track' : 'amber', r.hold != null ? 0 : 1); }
+    valUnit('halo.' + r.id, r.v, 'NUM_M', r.u, 'SMALL', K.colX, y + K.valueDy, 'left', r.hold != null ? 'text_dim' : 'text_hi');
+    if (r.id === 'max') touch('halo.touchMax', K.colX - 8, y, 480 - K.colX + 8, K.rowH, 'hold 1 s: reset session max');
+    if (r.id === 'trip') touch('halo.touchTrip', K.colX - 8, y, 480 - K.colX + 8, K.rowH, 'hold 1 s: reset trip');
+  });
+}
+
+/* ---------- 2. PURE — hero number ---------- */
+const PURE = { cx: 240, numBase: 196, unitBase: 226, barX: 28, barW: 424, barY: 248, barTh: 6, colY: 280, valY: 312 };
+function skinPure(v) {
+  const K = PURE, zt = zoneTok(v.pct);
+  text('pure.speed', String(v.spd), 'NUM_XXL', K.cx, K.numBase, 'center', 'text_hi');
+  text('pure.unit', U().spd, 'LABEL', K.cx, K.unitBase, 'center', 'text_dim');
+  // bar
+  hcapsule('pure.barTrack', K.barX, K.barY, K.barW, K.barTh, 'track');
+  const fw = Math.max(K.barTh, K.barW * v.pct);
+  g.save(); g.beginPath(); g.rect(K.barX - 4, K.barY - 10, fw + 4, 20); g.clip();
+  const lg = g.createLinearGradient(K.barX, 0, K.barX + K.barW, 0);
+  for (const [p, t] of ZONE_GRAD) lg.addColorStop(p, C(t));
+  g.strokeStyle = lg; g.lineWidth = K.barTh; g.lineCap = 'round'; g.beginPath(); g.moveTo(K.barX + 3, K.barY); g.lineTo(K.barX + fw - 3, K.barY); g.stroke(); g.restore();
+  rec('pure.barFill', { p: 'capsule + h-gradient', g: `x=${K.barX} y=${K.barY} w=barW·pct (min ${K.barTh}) th=${K.barTh}`, c: 'h-gradient ' + ZONE_GRAD.map(([p, t]) => `${Math.round(p * 100)}%:${t}`).join(' ') + ' over full bar width', n: 'gradient anchored to the full bar, fill clipped to value' });
+  const tipX = K.barX + fw - K.barTh / 2;
+  if (v.pct > 0) glow('pure.tipGlow', tipX, K.barY, 22, zt, 0.6);
+  circle('pure.tipDot', tipX, K.barY, 5, 'text_hi');
+  const mx = K.barX + K.barW * v.maxPct;
+  capsule('pure.maxMark', mx, K.barY - 8, mx, K.barY + 8, 2, 'amber', 1, 'session max marker');
+  // info row
+  const cols = [
+    { id: 'max', l: 'MAX', v: String(v.max), u: '', hold: v.maxHold },
+    { id: 'ride', l: tr('RIDE', 'IDŐ'), v: v.ride, u: '' },
+    { id: 'trip', l: tr('TRIP', 'ÚT'), v: v.trip, u: 'km', hold: v.tripHold },
+    { id: 'odo', l: 'ODO', v: v.odo, u: 'km' },
+  ];
+  const cw = 448 / 4;
+  cols.forEach((c, i) => {
+    const x = 16 + cw * i + cw / 2;
+    if (i) vline('pure.sep' + i, 16 + cw * i, K.colY - 8, 34, 'border');
+    statLabel('pure.' + c.id + '.label', c.l, x, K.colY, 'center', c.hold);
+    valUnit('pure.' + c.id, c.v, 'NUM_M', c.u, 'SMALL', x, K.valY, 'center', c.hold != null ? 'text_dim' : 'text_hi');
+    if (c.id === 'max' || c.id === 'trip') touch('pure.touch' + c.id, 16 + cw * i, 262, cw, 58, 'hold 1 s: reset ' + c.id);
+  });
+}
+
+/* ---------- 3. CHRONO — luxury watch dial ---------- */
+const CHR = { cx: 240, cy: 175, bezelR: 139, bezelTh: 8, faceR: 135, A0: -135, SW: 270, idxR0: 99, idxR1: 124, numR: 83,
+  winX: 196, winY: 205, winW: 88, winH: 54, numBase: 252, unitBase: 280, needleR: 127, tailR: 24 };
+function skinChrono(v) {
+  const K = CHR, { cx, cy, A0, SW } = K;
+  // bezel: metallic angle-gradient ring
+  const bez = [[0, 'metal_lo'], [0.125, 'metal_hi'], [0.3, 'metal_lo'], [0.5, 'metal_lo'], [0.625, 'metal_hi'], [0.8, 'metal_lo'], [1, 'metal_lo']];
+  arc('chrono.bezel', cx, cy, K.bezelR, K.bezelTh, 0, 359.99, null, { grad: bez, a0: -90, sweep: 360, caps: 'butt', n: 'full ring; highlights at -45° and +135° (brushed-steel sheen)' });
+  circle('chrono.face', cx, cy, K.faceR, 'face');
+  ring('chrono.chapter', cx, cy, 131, 1, 'border');
+  // zone arcs on the outer track
+  const ang = k => A0 + SW * k / 85;
+  arc('chrono.zoneAmber', cx, cy, 129, 3, ang(51), ang(72), 'amber', { caps: 'butt', n: '51..72 km/h (60–85 % of scale)' });
+  arc('chrono.zoneRed', cx, cy, 129, 3, ang(72), ang(85), 'red', { caps: 'butt', n: '72..85 km/h' });
+  // minute track
+  for (let k = 0; k <= 85; k++) {
+    if (k % 10 === 0) continue;
+    const five = k % 5 === 0, d = ang(k);
+    const [x0, y0] = polar(cx, cy, five ? 116 : 121, d), [x1, y1] = polar(cx, cy, 126, d);
+    capsule(null, x0, y0, x1, y1, five ? 2 : 1, five ? 'text_dim' : 'text_faint');
+  }
+  note('chrono.minuteTrack', 'every 1 km/h: capsule w=1 r 121..126 `text_faint`; every 5: w=2 r 116..126 `text_dim` (skip multiples of 10)');
+  // applied baton indices
+  for (let k = 0; k <= 80; k += 10) {
+    const d = ang(k);
+    const pts = [polar(cx, cy, K.idxR1, d - 1.7), polar(cx, cy, K.idxR1, d + 1.7), polar(cx, cy, K.idxR0, d + 2.0), polar(cx, cy, K.idxR0, d - 2.0)];
+    poly(null, pts, 'text_hi');
+    const [lx, ly] = polar(cx, cy, K.idxR1 - 4, d), [lx2, ly2] = polar(cx, cy, K.idxR0 + 5, d);
+    capsule(null, lx, ly, lx2, ly2, 1.5, 'accent', 0.9);
+    const [nx, ny] = polar(cx, cy, K.numR, d);
+    text(null, String(k), 'BODYB', Math.round(nx), Math.round(ny + 6), 'center', 'text');
+  }
+  note('chrono.indices', `every 10 km/h: baton quad r ${K.idxR0}..${K.idxR1}, ±1.7° outer / ±2.0° inner, \`text_hi\`, with lume line capsule w=1.5 r ${K.idxR0 + 5}..${K.idxR1 - 4} \`accent\` @90%. Numerals BODYB \`text\` centred at r=${K.numR}, baseline = centre.y+6`);
+  // brand
+  text('chrono.brand', 'SUR-RON', 'LABEL', cx, 146, 'center', 'text_dim', { track: 3 });
+  // digital window
+  rrect('chrono.window', K.winX, K.winY, K.winW, K.winH, 10, 'bg');
+  rrectStroke('chrono.window.stroke', K.winX, K.winY, K.winW, K.winH, 10, 'border');
+  text('chrono.speed', String(v.spd), 'NUM_L', cx, K.numBase, 'center', 'text_hi');
+  text('chrono.unit', U().spd, 'LABEL', cx, K.unitBase, 'center', 'text_dim');
+  // max tell-tale
+  const dm = ang(v.max);
+  poly('chrono.maxMark', [polar(cx, cy, 112, dm), polar(cx, cy, 104, dm - 3), polar(cx, cy, 104, dm + 3)], 'amber', 1, 'tip r=112, base r=104 ±3°');
+  // needle (shadow, needle, hub)
+  const dv = A0 + SW * v.pct;
+  const needle = (ox, oy) => [polar(cx + ox, cy + oy, K.needleR, dv), polar(cx + ox, cy + oy, 10, dv + 22), polar(cx + ox, cy + oy, K.tailR, dv + 180 - 8), polar(cx + ox, cy + oy, K.tailR, dv + 180 + 8), polar(cx + ox, cy + oy, 10, dv - 22)];
+  poly('chrono.needleShadow', needle(2, 4), 'shadow', THEME === 'dark' ? 0.55 : 0.22, 'same polygon offset (+2,+4)');
+  poly('chrono.needle', needle(0, 0), 'accent', 1, `tip r=${K.needleR}; shoulders r=10 at ±22°; tail r=${K.tailR} at 180°±8°`);
+  circle('chrono.hub', cx, cy, 10, 'metal_lo');
+  ring('chrono.hubRing', cx, cy, 9, 2, 'metal_hi');
+  circle('chrono.hubDot', cx, cy, 3.5, 'accent');
+  // corners
+  const L = (id, lab, val, unit, x, yl, align, hold) => {
+    statLabel('chrono.' + id + '.label', lab, x, yl, align, hold);
+    valUnit('chrono.' + id, val, 'NUM_M', unit, 'SMALL', x, yl + 34, align, hold != null ? 'text_dim' : 'text_hi');
+  };
+  L('ride', tr('RIDE', 'IDŐ'), v.ride, '', 16, 60, 'left');
+  L('trip', tr('TRIP', 'ÚT'), v.trip, 'km', 464, 60, 'right', v.tripHold);
+  L('max', 'MAX', String(v.max), 'km/h', 16, 272, 'left', v.maxHold);
+  L('odo', 'ODO', v.odo, 'km', 464, 272, 'right');
+  touch('chrono.touchTrip', 380, 36, 100, 72, 'hold 1 s: reset trip');
+  touch('chrono.touchMax', 0, 248, 100, 72, 'hold 1 s: reset session max');
+}
+
+/* ---------- 4. APEX — track telemetry HUD ---------- */
+const APEX = { segX: 16, segY: 38, segN: 32, segPitch: 14, segW: 11, segH: 12, skew: 3,
+  numRight: 206, numBase: 176, gx: 256, gy: 78, gw: 208, gh: 158, gcx: 360, gcy: 176, gR: 56, gTh: 10, stripY: 248 };
+function skinApex(v) {
+  const K = APEX;
+  // segment bar
+  const lit = Math.round(v.pct * K.segN);
+  for (let i = 0; i < K.segN; i++) {
+    const x = K.segX + i * K.segPitch, p = (i + 0.5) / K.segN;
+    const c = i < lit ? zoneTok(p) : 'track';
+    poly(null, [[x + K.skew, K.segY], [x + K.segW + K.skew, K.segY], [x + K.segW, K.segY + K.segH], [x, K.segY + K.segH]], c);
+  }
+  note('apex.segments', `${K.segN} parallelograms, x = ${K.segX} + i·${K.segPitch}, y=${K.segY}, w=${K.segW}, h=${K.segH}, top edge skewed +${K.skew}px. lit = round(pct·${K.segN}); lit colour = zone colour of segment centre ((i+.5)/${K.segN}); unlit \`track\`. At ≥97 % the last 4 lit segments blink `+ '`red`/`text_hi` at 6 Hz (shift-light)');
+  for (const k of [0, 20, 40, 60, 80]) {
+    const x = K.segX + (k / 85) * (K.segN * K.segPitch);
+    text(null, String(k), 'LABEL', Math.round(x + (k ? 0 : 1)), 70, k ? 'center' : 'left', 'text_faint', { track: 0.5 });
+  }
+  note('apex.scale', 'scale numerals 0/20/40/60/80 LABEL (track 0.5) `text_faint`, baseline 70, centred at x = 16 + v/85·448 (0 left-aligned)');
+  // speed
+  text('apex.speed', String(v.spd), 'NUM_XL', K.numRight, K.numBase, 'right', 'text_hi');
+  text('apex.unit', U().spd, 'LABEL', K.numRight + 10, K.numBase, 'left', 'text_dim');
+  // peak chip
+  chamferPanel('apex.peak', 16, 196, 228, 42, 10);
+  statLabel('apex.peak.label', tr('PEAK', 'CSÚCS'), 30, 222, 'left', v.maxHold, 'amber');
+  valUnit('apex.peak', String(v.max), 'TITLE', 'km/h', 'SMALL', 230, 226, 'right', v.maxHold != null ? 'text_dim' : 'text_hi');
+  touch('apex.touchPeak', 16, 190, 228, 54, 'hold 1 s: reset session max');
+  // G panel
+  chamferPanel('apex.gPanel', K.gx, K.gy, K.gw, K.gh, 14);
+  text('apex.gLabel', tr('LONG. G', 'GYORS. G'), 'LABEL', K.gx + 16, K.gy + 22, 'left', 'text_dim');
+  text('apex.gPeak', `PEAK ${RIDE.peakG.toFixed(2)}`, 'LABEL', K.gx + K.gw - 14, K.gy + 22, 'right', 'amber');
+  const gp = Math.min(1, v.g / 0.6), GA0 = -90, GSW = 180;
+  for (let k = 0; k <= 6; k++) {
+    const d = GA0 + GSW * k / 6, [x0, y0] = polar(K.gcx, K.gcy, K.gR + 9, d), [x1, y1] = polar(K.gcx, K.gcy, K.gR + (k % 3 === 0 ? 15 : 13), d);
+    capsule(null, x0, y0, x1, y1, k % 3 === 0 ? 2 : 1.5, k % 3 === 0 ? 'text_dim' : 'text_faint');
+  }
+  note('apex.gTicks', `7 ticks at 0.0,0.1..0.6 G: r ${K.gR + 9}..${K.gR + 13} (0/0.3/0.6: ..${K.gR + 15}, w=2 \`text_dim\`), others w=1.5 \`text_faint\``);
+  arc('apex.gTrack', K.gcx, K.gcy, K.gR, K.gTh, GA0, GA0 + GSW, 'track');
+  arc('apex.gValue', K.gcx, K.gcy, K.gR, K.gTh, GA0, GA0 + GSW * gp, null, { grad: [[0, 'accent'], [0.55, 'accent'], [0.8, 'amber'], [1, 'amber']], a0: GA0, sweep: GSW, n: 'end = -90° + 180°·(G/0.60)' });
+  if (gp > 0) { const [tx, ty] = polar(K.gcx, K.gcy, K.gR, GA0 + GSW * gp); glow('apex.gGlow', tx, ty, 24, gp > 0.66 ? 'amber' : 'accent', 0.5); circle('apex.gTip', tx, ty, 3.5, 'text_hi'); }
+  const dpk = GA0 + GSW * (RIDE.peakG / 0.6);
+  { const [px, py] = polar(K.gcx, K.gcy, K.gR, dpk); circle('apex.gPeakMark', px, py, 3, 'amber', 1, 'peak-G tell-tale on the arc centre-line, drawn after the value arc'); }
+  valUnit('apex.g', v.g.toFixed(2), 'NUM_M', 'G', 'LABEL', K.gcx, K.gcy - 2, 'center', 'text_hi', 'text_dim', 4);
+  // sparkline (last 4 s of G)
+  const sx = K.gx + 16, sw = K.gw - 32, sy0 = K.gy + K.gh - 14, sh = 30;
+  const tr_ = gTrace(40, v.g);
+  hline('apex.sparkBase', sx, sy0, sw, 'border');
+  const P = tr_.map((val, i) => [sx + sw * i / (tr_.length - 1), sy0 - sh * (val / 0.6)]);
+  for (let i = 1; i < P.length; i++) poly(null, [[P[i - 1][0], P[i - 1][1]], [P[i][0], P[i][1]], [P[i][0], sy0], [P[i - 1][0], sy0]], 'accent', 0.16);
+  for (let i = 1; i < P.length; i++) capsule(null, P[i - 1][0], P[i - 1][1], P[i][0], P[i][1], 2, 'accent');
+  circle(null, P[P.length - 1][0], P[P.length - 1][1], 3, 'text_hi');
+  note('apex.spark', `G history sparkline: x ${sx}..${sx + sw}, baseline y=${sy0} (hline \`border\`), height ${sh}px = 0.60 G, 40 samples (10 Hz, 4 s). Area = one convex quad per segment \`accent\` @16%; line = capsules w=2 \`accent\`; newest point dot r=3 \`text_hi\``);
+  // bottom strip
+  chamferPanel('apex.strip', 16, K.stripY, 448, 64, 12);
+  const cells = [
+    { id: 'ride', l: tr('RIDE', 'IDŐ'), v: v.ride, u: '' },
+    { id: 'trip', l: tr('TRIP', 'ÚT'), v: v.trip, u: 'km', hold: v.tripHold },
+    { id: 'odo', l: 'ODO', v: v.odo, u: 'km' },
+  ];
+  cells.forEach((c, i) => {
+    const x = 16 + i * 149;
+    if (i) vline('apex.stripSep' + i, x, K.stripY + 12, 40, 'border');
+    statLabel('apex.' + c.id + '.label', c.l, x + 18, K.stripY + 22, 'left', c.hold);
+    valUnit('apex.' + c.id, c.v, 'NUM_M', c.u, 'SMALL', x + 18, K.stripY + 54, 'left', c.hold != null ? 'text_dim' : 'text_hi');
+  });
+  touch('apex.touchTrip', 165, K.stripY, 149, 64, 'hold 1 s: reset trip');
+}
+
+const SKINS = {
+  halo:   { name: 'HALO',   fn: skinHalo,   desc: tr('Ring gauge', 'Gyűrű') },
+  pure:   { name: 'PURE',   fn: skinPure,   desc: 'Hero number' },
+  chrono: { name: 'CHRONO', fn: skinChrono, desc: 'Watch dial' },
+  apex:   { name: 'APEX',   fn: skinApex,   desc: 'Track HUD' },
+};
+function scrDash(skin, spd, o = {}) {
+  rect('bg', 0, 0, W, H, 'bg');
+  topBar(1, '', o.st || {});
+  SKINS[skin].fn(dashData(spd, o));
+}
+
+/* =====================================================================================
+   RACE / LAUNCH TIMER
+   ===================================================================================== */
+const RACE = { chipY: 44, chipH: 32, resetX: 196, resetY: 36, resetW: 96, resetH: 48, timerX: 14, timerBase: 186, barY: 208, barW: 276,
+  tileY: 228, tileH: 84, tileW: 134, colX: 304, colW: 160 };
+function scrRace(state, o = {}) {
+  const K = RACE;
+  rect('bg', 0, 0, W, H, 'bg');
+  topBar(2, tr('RACE · 0–50 KM/H', 'VERSENY · 0–50 KM/H'), o.st || {});
+  const S = {
+    ready:    { chip: tr('Ready to launch', 'Rajtra kész'), c: 'green', t: '0.00', tc: 'text_hi', spd: 0, bar: 0, bc: 'accent' },
+    pulling:  { chip: tr('Pulling…', 'Gyorsítás…'), c: 'amber', t: '2.87', tc: 'accent', spd: 41, bar: 41 / 50, bc: 'accent' },
+    finished: { chip: tr('Run finished', 'Futam kész'), c: 'green', t: '3.42', tc: 'green', spd: 78, bar: 1, bc: 'green' },
+    stop:     { chip: tr('Stop to arm', 'Állj meg'), c: 'text_dim', t: '0.00', tc: 'text_faint', spd: 12, bar: 0, bc: 'accent' },
+  }[state];
+  // status chip
+  const cw = Math.round(tw(S.chip, 'BODYB')) + 44;
+  rrect('race.chip', 16, K.chipY, cw, K.chipH, 16, S.c, 0.14, 'width = text + 44');
+  if (state === 'ready') glow('race.chipDotGlow', 32, K.chipY + 16, 12, 'green', 0.8, 'pulses 1 Hz (A 0→80 %)');
+  circle('race.chipDot', 32, K.chipY + 16, 4.5, S.c);
+  text('race.chipText', S.chip, 'BODYB', 44, K.chipY + 22, 'left', S.c);
+  // reset
+  card('race.reset', K.resetX, K.resetY, K.resetW, K.resetH, { r: 12, fill: 'surface' });
+  icon('race.resetIcon', 'reset', K.resetX + 16, K.resetY + 14, 20, 'text_dim');
+  text('race.resetText', tr('Reset', 'Újra'), 'BODYB', K.resetX + 44, K.resetY + 30, 'left', 'text');
+  touch('race.touchReset', K.resetX, K.resetY - 4, K.resetW + 8, K.resetH + 8, 'tap: reset / re-arm run');
+  // timer
+  const tt = text('race.timer', S.t, 'NUM_XL', K.timerX, K.timerBase, 'left', S.tc, { n: 'running: updates every frame, 2 decimals' });
+  text('race.timerUnit', 's', 'TITLE', tt.x0 + tt.w + 6, K.timerBase, 'left', 'text_dim');
+  // progress to 50
+  hcapsule('race.barTrack', 16, K.barY, K.barW, 8, 'track');
+  if (S.bar > 0) {
+    hcapsule('race.barFill', 16, K.barY, Math.max(8, K.barW * S.bar), 8, S.bc, 1, 'w = 276·speed/50');
+    if (state === 'pulling') glow('race.barGlow', 16 + K.barW * S.bar - 4, K.barY, 20, 'accent', 0.6);
+  }
+  // tiles
+  const tile = (id, x, lab, lc, val, vc) => {
+    card('race.' + id, x, K.tileY, K.tileW, K.tileH);
+    text('race.' + id + '.label', lab, 'LABEL', x + 16, K.tileY + 26, 'left', lc);
+    valUnit('race.' + id, val, 'NUM_M', 's', 'SMALL', x + 16, K.tileY + 64, 'left', vc, 'text_dim', 4);
+  };
+  tile('best', 16, tr('BEST', 'LEGJOBB'), 'amber', state === 'finished' ? '3.42' : '3.58', 'amber');
+  if (state === 'finished') {
+    const bw = Math.round(tw(tr('NEW', 'ÚJ'), 'LABEL', 1)) + 14;
+    rrect('race.newBest', 16 + K.tileW - 12 - bw, K.tileY + 11, bw, 20, 10, 'amber', 1, 'only when this run set a new best; right edge = tile.x+tile.w−12');
+    text('race.newBestText', tr('NEW', 'ÚJ'), 'LABEL', 16 + K.tileW - 12 - bw / 2, K.tileY + 26, 'center', 'on_amber', { track: 1 });
+  }
+  tile('last', 158, tr('LAST', 'UTOLSÓ'), 'text_dim', state === 'finished' ? '3.42' : '3.71', 'text_hi');
+  // speed tile
+  card('race.speedTile', K.colX, 36, K.colW, 92);
+  text('race.speedLabel', tr('SPEED', 'SEBESSÉG'), 'LABEL', K.colX + 16, 60, 'left', 'text_dim');
+  valUnit('race.speed', String(S.spd), 'NUM_L', 'KM/H', 'LABEL', K.colX + 16, 112, 'left', 'text_hi', 'text_dim', 8);
+  // splits
+  card('race.splits', K.colX, 136, K.colW, 176);
+  text('race.splitsLabel', tr('SPLITS', 'RÉSZIDŐK'), 'LABEL', K.colX + 16, 160, 'left', 'text_dim');
+  const sp = state === 'finished' ? ['0.84', '1.02', '1.37', '6.65'] : state === 'pulling' ? ['—', '—', '—', '—'] : ['0.88', '1.05', '1.41', '6.92'];
+  const lbl = ['50–60', '60–70', '70–80'];
+  lbl.forEach((l, i) => {
+    const y = 192 + i * 30;
+    text('race.split' + i + '.label', l, 'SMALL', K.colX + 16, y, 'left', 'text_dim');
+    valUnit('race.split' + i, sp[i], 'BODYB', sp[i] === '—' ? '' : 's', 'SMALL', K.colX + K.colW - 16, y, 'right', sp[i] === '—' ? 'text_faint' : 'text', 'text_dim', 3);
+  });
+  hline('race.splitSep', K.colX + 16, 266, K.colW - 32, 'border');
+  text('race.totalLabel', tr('0–80 total', '0–80 össz.'), 'SMALL', K.colX + 16, 294, 'left', 'amber');
+  valUnit('race.total', sp[3], 'BODYB', sp[3] === '—' ? '' : 's', 'SMALL', K.colX + K.colW - 16, 294, 'right', sp[3] === '—' ? 'text_faint' : 'amber', 'amber', 3);
+}
+
+/* =====================================================================================
+   SETTINGS
+   ===================================================================================== */
+const SET = { railX: 6, railW: 94, railY: 31, itemH: 48, cx0: 112, cx1: 468 };
+const SECTIONS = [
+  { id: 'system', icon: 'system', en: 'System', hu: 'Rendszer' },
+  { id: 'skin', icon: 'skin', en: 'Skin', hu: 'Stílus' },
+  { id: 'speed', icon: 'speed', en: 'Speed', hu: 'Sebesség' },
+  { id: 'odo', icon: 'odo', en: 'Odometer', hu: 'Odométer' },
+  { id: 'lang', icon: 'lang', en: 'Language', hu: 'Nyelv' },
+  { id: 'wifi', icon: 'wifi', en: 'WiFi', hu: 'WiFi' },
+];
+function rail(active) {
+  const K = SET;
+  SECTIONS.forEach((s, i) => {
+    const y = K.railY + i * K.itemH, on = s.id === active;
+    const id = on ? 'set.railActive' : (i === 0 || (active === 'system' && i === 1) ? 'set.railItem' : null);
+    if (on) {
+      rrect(id, K.railX, y + 3, K.railW, K.itemH - 6, 12, 'surface_hi');
+      capsule(id && id + '.bar', K.railX + 1.5, y + 14, K.railX + 1.5, y + K.itemH - 14, 3, 'accent', 1, 'active indicator');
+    }
+    icon(id && id + '.icon', s.icon, K.railX + K.railW / 2 - 10, y + 6, 20, on ? 'accent' : 'text_dim');
+    text(id && id + '.label', tr(s.en, s.hu), 'LABEL', K.railX + K.railW / 2, y + 40, 'center', on ? 'text_hi' : 'text_dim', { track: 1 });
+    touch(i === 0 ? 'set.touchRail' : null, 0, y, 106, K.itemH, 'tap: open section');
+  });
+  note('set.rail', `6 items, y = ${K.railY} + i·${K.itemH}; icon 20px top-left (${K.railX + K.railW / 2 - 10}, y+6); label LABEL (track 1) centred x=${K.railX + K.railW / 2} baseline y+40; touch rect x=0 w=106 h=48`);
+}
+function scrSettings(section, o = {}) {
+  rect('bg', 0, 0, W, H, 'bg');
+  topBar(0, tr('Settings', 'Beállítások'), o.st || {});
+  rail(section);
+  ({ system: setSystem, skin: setSkin, speed: setSpeed, odo: setOdo, lang: setLang, wifi: setWifi })[section](o);
+}
+const CX = SET.cx0, CW = SET.cx1 - SET.cx0;
+function setSystem(o) {
+  // brightness
+  card('sys.bright', CX, 36, CW, 100);
+  text('sys.brightLabel', tr('BRIGHTNESS', 'FÉNYERŐ'), 'LABEL', CX + 16, 60, 'left', 'text_dim');
+  text('sys.brightValue', '72%', 'BODYB', CX + CW - 16, 61, 'right', 'text_hi');
+  const sx0 = 158, sx1 = 422, sy = 102, pct = (72 - 8) / 92, kx = Math.round(sx0 + (sx1 - sx0) * pct);
+  icon('sys.sunSmall', 'sun', CX + 16, sy - 8, 16, 'text_dim');
+  icon('sys.sunBig', 'sun', CX + CW - 16 - 22, sy - 11, 22, 'text_dim');
+  hcapsule('sys.sliderTrack', sx0, sy, sx1 - sx0, 8, 'track');
+  hcapsule('sys.sliderFill', sx0, sy, kx - sx0, 8, 'accent', 1, 'x = 158 + 264·(b−8)/92');
+  circle('sys.knobShadow', kx, sy + 2, 15, 'shadow', 0.3);
+  circle('sys.knob', kx, sy, 14, THEME === 'dark' ? 'text_hi' : 'surface');
+  ring('sys.knobRing', kx, sy, 13, 2, 'accent');
+  touch('sys.touchSlider', CX, 74, CW, 56, 'drag / tap: brightness 8–100 %');
+  // units
+  const row = (id, y, title, sub, opts, sel) => {
+    card('sys.' + id, CX, y, CW, 80);
+    text('sys.' + id + '.title', title, 'BODYB', CX + 16, y + 34, 'left', 'text_hi');
+    text('sys.' + id + '.sub', sub, 'SMALL', CX + 16, y + 57, 'left', 'text_dim');
+    seg('sys.' + id + '.seg', CX + CW - 16 - 164, y + 16, 164, 48, opts, sel);
+  };
+  row('units', 144, tr('Units', 'Mértékegység'), tr('Speed & distance', 'Sebesség és táv'), ['km/h', 'mph'], 0);
+  row('theme', 232, tr('Theme', 'Téma'), tr('Night / sunlight', 'Éjszakai / nappali'), [tr('Dark', 'Sötét'), tr('Light', 'Világos')], THEME === 'dark' ? 0 : 1);
+}
+const THUMBS = {};           // skin -> canvas 480x320 rendered at 35 km/h per theme
+function setSkin(o) {
+  const cw = (CW - 8) / 2, ch = 134, sel = o.sel ?? 'halo';
+  note('skin.grid', `2×2 cards ${cw}×${ch}, origins (112,36) (294,36) (112,178) (294,178); order HALO, PURE, CHRONO, APEX. Unselected card: 1 px \`border\` stroke, name \`text_dim\`, no check`);
+  Object.keys(SKINS).forEach((k, i) => {
+    const x = CX + (i % 2) * (cw + 8), y = 36 + Math.floor(i / 2) * (ch + 8), on = k === sel;
+    const id = i === 0 ? 'skin.card' : (on ? 'skin.cardSel' : null);
+    card(id, x, y, cw, ch, on ? { strokeC: 'accent', lw: 2 } : {});
+    const px = x + 15, py = y + 10;
+    g.save(); rrPath(px, py, 144, 96, 8); g.clip(); g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+    g.drawImage(THUMBS[THEME + ':' + k], px, py, 144, 96); g.restore();
+    rrectStroke(null, px, py, 144, 96, 8, 'border');
+    if (i === 0) rec('skin.thumb', { p: 'bitmap 144×96 (r=8 corner mask)', g: `x=card.x+15 y=card.y+10`, c: 'png/thumbs/skin_<name>_<theme>.png', n: 'pre-rendered, RGB565 27.6 KB each' });
+    text(id && id + '.name', SKINS[k].name, 'LABEL', x + 16, y + ch - 12, 'left', on ? 'text_hi' : 'text_dim', { track: 2 });
+    text(id && id + '.desc', [tr('Ring', 'Gyűrű'), tr('Minimal', 'Minimál'), tr('Watch', 'Óra'), 'HUD'][i], 'SMALL', x + cw - 16, y + ch - 11, 'right', 'text_dim');
+    if (on) {
+      circle('skin.check', px + 144 - 14, py + 14, 11, 'accent');
+      icon('skin.checkIcon', 'check', px + 144 - 23, py + 5, 18, 'on_accent');
+    }
+    touch(i === 0 ? 'skin.touchCard' : null, x, y, cw, ch, 'tap: select skin');
+  });
+}
+function roundBtn(id, x, y, w, h, kind, label) {
+  card(id, x, y, w, h, { r: 16, fill: 'surface_hi' });
+  if (kind === 'minus' || kind === 'plus') {
+    const cx = x + w / 2, cy = y + h / 2;
+    capsule(id && id + '.h', cx - 10, cy, cx + 10, cy, 4, 'text_hi');
+    if (kind === 'plus') capsule(id && id + '.v', cx, cy - 10, cx, cy + 10, 4, 'text_hi');
+  } else text(id && id + '.text', label, 'BODYB', x + w / 2, y + h / 2 + 6, 'center', 'text_hi');
+}
+function setSpeed(o) {
+  card('spd.cal', CX, 36, CW, 116);
+  text('spd.calLabel', tr('CALIBRATION', 'KALIBRÁCIÓ'), 'LABEL', CX + 16, 60, 'left', 'text_dim');
+  text('spd.calRange', '0.50 – 2.00', 'SMALL', CX + CW - 16, 60, 'right', 'text_dim');
+  roundBtn('spd.minus', CX + 16, 74, 64, 64, 'minus');
+  roundBtn('spd.plus', CX + CW - 16 - 64, 74, 64, 64, 'plus');
+  touch('spd.touchMinus', CX + 8, 70, 80, 72, 'tap −0.01, hold: repeat (400 ms delay, then 12/s, after 2 s 40/s)');
+  touch('spd.touchPlus', CX + CW - 88, 70, 80, 72, 'tap +0.01, hold: repeat');
+  const cwv = tw('1.04', 'NUM_L'), cx0 = Math.round(CX + CW / 2 - (cwv + 16) / 2);
+  text('spd.calValue', '1.04', 'NUM_L', cx0, 126, 'left', 'text_hi', { n: 'value + 7 px + 10×10 “×” drawn as 2 capsules; block centred on x=' + (CX + CW / 2) });
+  capsule('spd.calX1', cx0 + cwv + 7, 110, cx0 + cwv + 17, 120, 3, 'text_dim');
+  capsule('spd.calX2', cx0 + cwv + 17, 110, cx0 + cwv + 7, 120, 3, 'text_dim');
+  card('spd.filter', CX, 160, CW, 152);
+  text('spd.filterLabel', tr('FILTER MODE', 'SZŰRÉS'), 'LABEL', CX + 16, 184, 'left', 'text_dim');
+  const opts = [[tr('Fast / adaptive', 'Gyors / adaptív'), tr('Zero lag, instant stop', 'Késés nélkül')], [tr('OEM smooth', 'Gyári simítás'), tr('12-pulse average', '12 impulzus átlaga')]];
+  opts.forEach(([t, s], i) => {
+    const y = 196 + i * 56, on = i === 0, id = on ? 'spd.optSel' : 'spd.opt';
+    rrect(id, CX + 12, y, CW - 24, 50, 12, on ? 'accent' : 'bg', on ? 0.12 : 1);
+    if (on) rrectStroke(id + '.stroke', CX + 12, y, CW - 24, 50, 12, 'accent', 1.5);
+    ring(id + '.radio', CX + 34, y + 25, 9, 2, on ? 'accent' : 'text_dim');
+    if (on) circle(id + '.radioDot', CX + 34, y + 25, 4.5, 'accent');
+    text(id + '.title', t, 'BODYB', CX + 54, y + 31, 'left', on ? 'text_hi' : 'text');
+    text(id + '.sub', s, 'SMALL', CX + CW - 28, y + 30, 'right', 'text_dim');
+    touch(id + '.touch', CX + 12, y, CW - 24, 50, 'tap: select filter');
+  });
+}
+function setOdo(o) {
+  card('odo.card', CX, 36, CW, 156);
+  text('odo.label', tr('TOTAL DISTANCE', 'ÖSSZES MEGTETT TÁV'), 'LABEL', CX + 16, 60, 'left', 'text_dim');
+  valUnit('odo.value', o.reset ? '0.0' : RIDE.odoFull, 'NUM_L', 'km', 'TITLE', CX + CW / 2, 118, 'center', 'text_hi', 'text_dim', 8);
+  const bw = (CW - 32 - 12) / 2;
+  roundBtn('odo.minus', CX + 16, 132, bw, 48, 'text', '−10 km');
+  roundBtn('odo.plus', CX + 16 + bw + 12, 132, bw, 48, 'text', '+10 km');
+  touch('odo.touchMinus', CX + 16, 132, bw, 48, 'tap −10 km, hold: repeat (400 ms, then 8/s)');
+  touch('odo.touchPlus', CX + 16 + bw + 12, 132, bw, 48, 'tap +10 km, hold: repeat');
+  card('odo.resetCard', CX, 200, CW, 112);
+  text('odo.resetLabel', tr('DANGER ZONE', 'VESZÉLYES'), 'LABEL', CX + 16, 224, 'left', 'text_dim');
+  const bx = CX + 16, by = 238, bW = CW - 32, bH = 60, p = o.hold ?? 0;
+  rrect('odo.resetBtn', bx, by, bW, bH, 14, 'red', 0.10);
+  if (p > 0) {
+    g.save(); g.beginPath(); g.rect(bx, by, bW * p, bH); g.clip(); rrect(null, bx, by, bW, bH, 14, 'red', 0.38); g.restore();
+    rec('odo.resetProgress', { p: 'rrect clipped to x..x+w·p', g: `x=${bx} y=${by} w=${bW}·p h=${bH} r=14`, c: cn('red', 0.38), n: 'p = hold time / 2000 ms, linear' });
+  }
+  rrectStroke('odo.resetBtn.stroke', bx, by, bW, bH, 14, 'red', 1.5);
+  const lbl = p > 0 ? tr(`Keep holding… ${Math.round(p * 100)}%`, `Tartsd nyomva… ${Math.round(p * 100)}%`) : tr('Hold 2 s to reset odometer', 'Tartsd 2 mp-ig a nullázáshoz');
+  text('odo.resetText', lbl, 'BODYB', bx + bW / 2, by + bH / 2 + 6, 'center', p > 0 ? 'text_hi' : 'red', { n: 'idle `red`, holding `text_hi`' });
+  touch('odo.touchReset', bx, by, bW, bH, 'hold 2 s: reset odometer');
+}
+function setLang(o) {
+  const opts = [['en', 'EN', 'English', 'English interface'], ['hu', 'HU', 'Magyar', 'Magyar nyelvű felület']];
+  opts.forEach(([k, mono, name, sub], i) => {
+    const y = 36 + i * 136, on = k === LANG, id = on ? 'lang.cardSel' : 'lang.card';
+    card(id, CX, y, CW, 128, on ? { strokeC: 'accent', lw: 2 } : {});
+    circle(id + '.mono', CX + 52, y + 64, 28, on ? 'accent' : 'surface_hi', on ? 0.16 : 1);
+    text(id + '.monoText', mono, 'TITLE', CX + 52, y + 73, 'center', on ? 'accent' : 'text_dim');
+    text(id + '.name', name, 'TITLE', CX + 96, y + 62, 'left', 'text_hi');
+    text(id + '.sub', sub, 'SMALL', CX + 96, y + 86, 'left', 'text_dim');
+    if (on) { circle(id + '.check', CX + CW - 36, y + 64, 13, 'accent'); icon(null, 'check', CX + CW - 46, y + 54, 20, 'on_accent'); }
+    else ring(id + '.radio', CX + CW - 36, y + 64, 12, 2, 'text_faint');
+    touch(id + '.touch', CX, y, CW, 128, 'tap: switch language (applies immediately)');
+  });
+}
+const QR = ['11111110001011001001101111111', '10000010101000111110101000001', '10111010000010101001001011101', '10111010111011011100101011101', '10111010010000100111101011101', '10000010110111011010101000001', '11111110101010101010101111111', '00000000011100000000000000000', '11111011110101100100010101010', '11000101001010101000101010110', '10000111001000010110111101000', '01011000100010100000111010011', '10110011111011101100000111100', '01000100000001100001100110110', '00000011011110010000100100100', '00101100101100010010001001000', '10110110111111011111000101011', '11001101011011111111111011010', '10111010010000011000011110000', '10000100100110100000110010001', '10100111110101101111111111100', '00000000100110100000100010100', '11111110101001110011101010100', '10000010000110000001100011011', '10111010111101110000111111001', '10111010101110111011000011011', '10111010101010110011011111110', '10000010111010000000100011010', '11111110101001111111000011000'];
+function setWifi(o) {
+  const on = !!o.on;
+  card('wifi.toggleCard', CX, 36, CW, 72, on ? { strokeC: 'accent', strokeA: 0.6 } : {});
+  text('wifi.title', tr('Update hotspot', 'Frissítő hotspot'), 'BODYB', CX + 16, 66, 'left', 'text_hi');
+  if (on) {
+    circle('wifi.statusDot', CX + 20, 85, 4, 'green');
+    text('wifi.status', tr('On · 1 device connected', 'Be · 1 eszköz csatlakozva'), 'SMALL', CX + 30, 90, 'left', 'green');
+  } else text('wifi.status', tr('Off · firmware v4.1.1', 'Ki · firmware v4.1.1'), 'SMALL', CX + 16, 90, 'left', 'text_dim');
+  toggle('wifi.toggle', CX + CW - 16 - 68, 52, on);
+  touch('wifi.touchToggle', CX, 36, CW, 72, 'tap: hotspot on/off');
+  card('wifi.body', CX, 116, CW, 196);
+  if (on) {
+    const qx = CX + 12, qy = 128, m = 4, n = QR.length, pad = 8;
+    rrect('wifi.qrBox', qx, qy, n * m + 2 * pad, n * m + 2 * pad, 10, 'qr_bg', 1, 'white in both themes');
+    rrectStroke('wifi.qrBox.stroke', qx, qy, n * m + 2 * pad, n * m + 2 * pad, 10, 'border');
+    g.fillStyle = C('qr_fg'); for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) if (QR[y][x] === '1') g.fillRect(qx + pad + x * m, qy + pad + y * m, m, m);
+    rec('wifi.qr', { p: 'QR modules (rects, no AA)', g: `x=${qx + pad} y=${qy + pad} ${n}×${n} modules × ${m}px = ${n * m}px`, c: cn('qr_fg'), n: 'payload WIFI:T:WPA;S:<ssid>;P:<pass>;; — version 3, ECC L, byte mode (46 B)' });
+    text('wifi.qrHint', tr('Scan to join', 'Olvasd be'), 'SMALL', qx + (n * m + 2 * pad) / 2, 296, 'center', 'text_dim');
+    const ix = qx + n * m + 2 * pad + 18, rows = [[tr('NETWORK', 'HÁLÓZAT'), 'WheelieAssist-1A2B', 'text_hi'], [tr('PASSWORD', 'JELSZÓ'), 'k7m2qx9vtp', 'text_hi'], [tr('ADDRESS', 'CÍM'), 'http://192.168.4.1', 'accent']];
+    rows.forEach(([l, v, c], i) => {
+      const y = 144 + i * 44;
+      text('wifi.row' + i + '.label', l, 'LABEL', ix, y, 'left', 'text_dim');
+      text('wifi.row' + i + '.value', v, 'BODYB', ix, y + 22, 'left', c);
+    });
+    hline('wifi.sep', ix, 268, CX + CW - 16 - ix, 'border');
+    text('wifi.fw', 'Firmware v4.1.1', 'SMALL', ix, 294, 'left', 'text_dim');
+  } else {
+    text('wifi.howLabel', tr('HOW TO UPDATE', 'FRISSÍTÉS LÉPÉSEI'), 'LABEL', CX + 16, 140, 'left', 'text_dim');
+    const steps = [tr('Download the .bin to your phone', 'Töltsd le a .bin fájlt a telefonra'), tr('Turn on the hotspot above', 'Kapcsold be fent a hotspotot'),
+      tr('Scan the QR code to join', 'Csatlakozz a QR-kóddal'), tr('Open 192.168.4.1 and upload', 'Nyisd meg: 192.168.4.1, feltöltés')];
+    steps.forEach((s, i) => {
+      const cy = 166 + i * 37;
+      ring('wifi.step' + i + '.ring', CX + 30, cy, 12, 1.5, 'accent');
+      text('wifi.step' + i + '.n', String(i + 1), 'BODYB', CX + 30, cy + 6, 'center', 'accent');
+      text('wifi.step' + i + '.text', s, 'BODY', CX + 54, cy + 6, 'left', 'text');
+    });
+  }
+}
+
+/* =====================================================================================
+   FIRMWARE UPDATE OVERLAY + BOOT
+   ===================================================================================== */
+function scrOta(state) {
+  rect('bg', 0, 0, W, H, 'bg');
+  if (state === 'progress') {
+    const p = 0.64;
+    text('ota.title', tr('Updating firmware', 'Firmware frissítés'), 'TITLE', 240, 56, 'center', 'text_hi');
+    const wt = tw(tr('Do not power off', 'Ne kapcsold ki!'), 'BODYB'), cw = Math.round(wt) + 56;
+    rrect('ota.warnChip', 240 - cw / 2, 72, cw, 34, 17, 'amber', 0.14, 'width = text + 56, centred');
+    icon('ota.warnIcon', 'warn', 240 - cw / 2 + 14, 79, 20, 'amber');
+    text('ota.warnText', tr('Do not power off', 'Ne kapcsold ki!'), 'BODYB', 240 - cw / 2 + 42, 95, 'left', 'amber');
+    text('ota.pct', Math.round(p * 100) + '%', 'NUM_XL', 240, 222, 'center', 'text_hi');
+    hcapsule('ota.barTrack', 64, 246, 352, 12, 'track');
+    hcapsule('ota.barFill', 64, 246, 352 * p, 12, 'accent', 1, 'w = 352·p');
+    glow('ota.barGlow', 64 + 352 * p - 6, 246, 26, 'accent', 0.6);
+    text('ota.mb', '1.21 / 1.89 MB', 'SMALL', 64, 284, 'left', 'text_dim');
+    text('ota.fw', tr('Current v4.1.1', 'Jelenlegi v4.1.1'), 'SMALL', 416, 284, 'right', 'text_dim');
+  } else if (state === 'success') {
+    ring('ota.okHalo', 240, 118, 52, 8, 'green', 0.18, 'halo ring, no gradient');
+    circle('ota.okCircle', 240, 118, 44, 'green');
+    capsule('ota.check1', 221, 120, 234, 133, 8, 'on_accent');
+    capsule('ota.check2', 234, 133, 260, 105, 8, 'on_accent');
+    text('ota.okTitle', tr('Update complete', 'Frissítés kész'), 'TITLE', 240, 206, 'center', 'text_hi');
+    text('ota.okSub', tr('Restarting…', 'Újraindul…'), 'BODY', 240, 236, 'center', 'text_dim');
+    arc('ota.spinner', 240, 272, 10, 3, 30, 290, 'accent', { n: 'spinner, rotates 1 turn / 800 ms' });
+  } else {
+    ring('ota.errHalo', 240, 104, 48, 8, 'red', 0.18, 'halo ring, no gradient');
+    circle('ota.errCircle', 240, 104, 40, 'red');
+    capsule('ota.errBar', 240, 84, 240, 110, 8, 'on_accent');
+    circle('ota.errDot', 240, 125, 5, 'on_accent');
+    text('ota.errTitle', tr('Update failed', 'Frissítés sikertelen'), 'TITLE', 240, 180, 'center', 'text_hi');
+    text('ota.errText', tr('Invalid image — use the plain .bin, not -full.bin', 'Hibás fájl — a sima .bin kell, nem a -full.bin'), 'BODY', 240, 208, 'center', 'text', { n: 'g_ota.error, wrap to max 2 lines × 400 px, line pitch 24' });
+    text('ota.errHint', tr('Hotspot stays on — try again', 'A hotspot bekapcsolva marad — próbáld újra'), 'SMALL', 240, 234, 'center', 'text_dim');
+    card('ota.close', 168, 254, 144, 52, { r: 14, fill: 'surface_hi' });
+    text('ota.closeText', tr('Close', 'Bezár'), 'BODYB', 240, 286, 'center', 'text_hi');
+    touch('ota.touchClose', 160, 250, 160, 60, 'tap: dismiss overlay');
+  }
+}
+let LOGO = null;
+function scrBoot() {
+  const saveT = T; T = THEMES.dark;
+  rect('bg', 0, 0, W, H, 'bg', 1, 'boot is always dark');
+  g.drawImage(LOGO, 80, 52);
+  rec('boot.logo', { p: 'bitmap 320×167 (0x0000 = transparent)', g: 'x=80 y=52', c: 'logo_bitmap', n: 'fade in 0→100 % over 400 ms, ease-out' });
+  hcapsule('boot.lineTrack', 180, 236, 120, 3, 'track');
+  hcapsule('boot.line', 180 + 60 - 40, 236, 80, 3, 'accent', 1, 'loader: grows from centre to 120 px while booting');
+  text('boot.version', 'WheelieAssist v4.1.1', 'SMALL', 240, 276, 'center', 'text_dim');
+  T = saveT;
+}
+
+/* =====================================================================================
+   GALLERY
+   ===================================================================================== */
+const GALLERY = [];
+function S(title, note, items) { GALLERY.push({ title, note, items }); }
+const I = (name, cap, draw, o = {}) => ({ name, cap, draw, theme: o.theme || 'dark', lang: o.lang || 'en', spec: o.spec });
+const SK = Object.keys(SKINS);
+S('Dashboard skins — dark (0 / 35 / 72 km/h)', 'Rows: HALO, PURE, CHRONO, APEX. The 35 km/h variants show the WiFi indicator, the 72 km/h variants the DEMO badge (top-right status area).',
+  SK.flatMap(k => [0, 35, 72].map(s => I(`dash_${k}_${String(s).padStart(2, '0')}`, `${SKINS[k].name} · ${s} km/h`, () => scrDash(k, s, { st: s === 35 ? { wifi: 1 } : s === 72 ? { demo: 1 } : {} }), { spec: s === 35 ? 'dash_' + k : null }))));
+S('Dashboard skins — light (sunlight) at 72 km/h', '', SK.map(k => I(`dash_${k}_72_light`, `${SKINS[k].name} · light · 72 km/h`, () => scrDash(k, 72, { st: { wifi: 1 } }), { theme: 'light' })));
+S('Interaction states', 'Hold-to-reset feedback: the label turns accent, a 14 px progress ring appears next to it and the value dims; at 100 % the value snaps to 0 and the label shows a green “RESET” for 800 ms.', [
+  I('dash_halo_trip_hold', 'HALO · trip hold 60 %', () => scrDash('halo', 35, { tripHold: 0.6 })),
+  I('dash_pure_max_hold', 'PURE · max hold 35 %', () => scrDash('pure', 48, { maxHold: 0.35 })),
+  I('dash_apex_trip_hold', 'APEX · trip hold 80 %', () => scrDash('apex', 0, { tripHold: 0.8 })),
+  I('dash_halo_35_hu', 'HALO · Magyar', () => scrDash('halo', 35, {}), { lang: 'hu' }),
+]);
+S('Race / launch timer', '', [
+  I('race_ready', 'READY', () => scrRace('ready'), { spec: 'race' }),
+  I('race_pulling', 'PULLING…', () => scrRace('pulling')),
+  I('race_finished', 'RUN FINISHED (new best)', () => scrRace('finished')),
+  I('race_stop', 'STOP TO ARM (rolling)', () => scrRace('stop')),
+  I('race_pulling_light', 'PULLING · light', () => scrRace('pulling', { st: { wifi: 1 } }), { theme: 'light' }),
+  I('race_finished_hu', 'FUTAM KÉSZ · Magyar', () => scrRace('finished'), { lang: 'hu' }),
+]);
+S('Settings', 'Left rail with six 106×48 touch targets; content column x 112–468.', [
+  I('set_system', 'System', () => scrSettings('system'), { spec: 'set_system' }),
+  I('set_skin', 'Skin', () => scrSettings('skin'), { spec: 'set_skin' }),
+  I('set_speed', 'Speed', () => scrSettings('speed'), { spec: 'set_speed' }),
+  I('set_odo', 'Odometer', () => scrSettings('odo'), { spec: 'set_odo' }),
+  I('set_odo_hold', 'Odometer · holding reset 55 %', () => scrSettings('odo', { hold: 0.55 })),
+  I('set_lang', 'Language', () => scrSettings('lang'), { spec: 'set_lang' }),
+  I('set_wifi_on', 'WiFi update · on', () => scrSettings('wifi', { on: 1, st: { wifi: 1 } }), { spec: 'set_wifi_on' }),
+  I('set_wifi_off', 'WiFi update · off', () => scrSettings('wifi', { on: 0 }), { spec: 'set_wifi_off' }),
+  I('set_system_light', 'System · light', () => scrSettings('system'), { theme: 'light' }),
+  I('set_wifi_on_light', 'WiFi · on · light', () => scrSettings('wifi', { on: 1, st: { wifi: 1 } }), { theme: 'light' }),
+  I('set_speed_hu', 'Sebesség · Magyar', () => scrSettings('speed'), { lang: 'hu' }),
+  I('set_wifi_off_hu', 'WiFi · ki · Magyar', () => scrSettings('wifi', { on: 0 }), { lang: 'hu' }),
+]);
+S('Firmware update overlay', 'Full screen, input blocked, drawn over any page.', [
+  I('ota_progress', 'Uploading 64 %', () => scrOta('progress'), { spec: 'ota_progress' }),
+  I('ota_success', 'Success', () => scrOta('success'), { spec: 'ota_success' }),
+  I('ota_error', 'Error', () => scrOta('error'), { spec: 'ota_error' }),
+  I('ota_progress_light', 'Uploading · light', () => scrOta('progress'), { theme: 'light' }),
+]);
+S('Boot', '', [I('boot', 'Boot splash', () => scrBoot(), { spec: 'boot' })]);
+
+/* ------------------------------------------------------------------ rendering */
+function quantize565(ctx) {
+  const im = ctx.getImageData(0, 0, W, H), d = im.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i] >> 3, gg = d[i + 1] >> 2, b = d[i + 2] >> 3;
+    d[i] = (r << 3) | (r >> 2); d[i + 1] = (gg << 2) | (gg >> 4); d[i + 2] = (b << 3) | (b >> 2); d[i + 3] = 255;
+  }
+  ctx.putImageData(im, 0, 0);
+}
+function renderTo(canvas, item, opts = {}) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  g = ctx; THEME = item.theme; T = THEMES[THEME]; LANG = item.lang; TOUCH = [];
+  g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, W, H); g.globalAlpha = 1;
+  item.draw();
+  if (opts.q) quantize565(ctx);
+  if (opts.touch) drawTouchOverlay();
+}
+function buildThumbs() {
+  for (const th of ['dark', 'light']) for (const k of Object.keys(SKINS)) {
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    renderTo(c, I('t', '', () => scrDash(k, 35, {}), { theme: th }), { q: false });
+    THUMBS[th + ':' + k] = c;
+  }
+}
+const CANVASES = [];
+function renderAll() {
+  const q = document.getElementById('optQ').checked, t = document.getElementById('optT').checked;
+  for (const { canvas, item } of CANVASES) renderTo(canvas, item, { q, touch: t });
+}
+function buildPage() {
+  const app = document.getElementById('app');
+  for (const sec of GALLERY) {
+    const s = document.createElement('section');
+    s.innerHTML = `<h2>${sec.title}</h2>` + (sec.note ? `<p class="note">${sec.note}</p>` : '');
+    const grid = document.createElement('div'); grid.className = 'grid';
+    for (const item of sec.items) {
+      const fig = document.createElement('figure'), c = document.createElement('canvas');
+      c.width = W; c.height = H; c.id = item.name;
+      fig.appendChild(c);
+      const cap = document.createElement('figcaption'); cap.innerHTML = `<b>${item.cap}</b><code>${item.name}.png</code>`;
+      fig.appendChild(cap); grid.appendChild(fig);
+      CANVASES.push({ canvas: c, item });
+    }
+    s.appendChild(grid); app.appendChild(s);
+  }
+  const sw = document.getElementById('swatches');
+  for (const k of Object.keys(THEMES.dark)) {
+    sw.insertAdjacentHTML('beforeend', `<div class="sw"><i style="background:${THEMES.dark[k]}"></i><i style="background:${THEMES.light[k]}"></i><div><b>${k}</b>${THEMES.dark[k]} · ${THEMES.light[k]}</div></div>`);
+  }
+}
+
+/* ------------------------------------------------------------------ spec generation */
+function specFor(item) {
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  REC = []; renderTo(c, item, { q: false }); const out = REC; REC = null; return out;
+}
+function mdEsc(s) { return String(s ?? '').replace(/\|/g, '\\|'); }
+function mdTable(rows, skipChrome = true) {
+  let md = '| id | primitive | geometry | colour | font / text | notes |\n|---|---|---|---|---|---|\n';
+  for (const r of rows) {
+    if (skipChrome && r.id.startsWith('chrome.')) continue;
+    if (r.id === 'bg') continue;
+    md += `| \`${r.id}\` | ${mdEsc(r.p)} | ${mdEsc(r.g)} | ${mdEsc(r.c)} | ${r.f ? '`' + r.f + '` ' : ''}${r.t != null ? '“' + mdEsc(r.t) + '”' : ''} | ${mdEsc(r.n)} |\n`;
+  }
+  return md;
+}
+function genSpec() {
+  const blocks = {};
+  // tokens
+  let md = '| token | dark hex | dark RGB565 | light hex | light RGB565 | use |\n|---|---|---|---|---|---|\n';
+  for (const k of Object.keys(THEMES.dark)) md += `| \`${k}\` | \`${THEMES.dark[k]}\` | \`${hex565(to565(THEMES.dark[k]))}\` | \`${THEMES.light[k]}\` | \`${hex565(to565(THEMES.light[k]))}\` | ${TOKEN_DOC[k] || ''} |\n`;
+  blocks.tokens = md;
+  // fonts
+  const c = document.createElement('canvas'); g = c.getContext('2d');
+  md = '| token | file | px | tracking | digits | cap height (H) | digit height (0) | digit cell (tabular) | advance of space | glyph set |\n|---|---|---|---|---|---|---|---|---|---|\n';
+  for (const [k, f] of Object.entries(FONTS)) {
+    g.font = fontCss(f);
+    const mh = g.measureText('H'), m0 = g.measureText('0');
+    md += `| \`F_${k}\` | BarlowSemiCondensed-${f.file} | ${f.s} | ${f.track}${f.upper ? ' (UPPERCASE)' : ''} | ${f.tab ? 'tabular' : 'proportional'} | ${Math.round(mh.actualBoundingBoxAscent)} | ${Math.round(m0.actualBoundingBoxAscent)} | ${f.tab ? digitCell(f) : '–'} | ${adv(f, ' ')} | ${f.glyphs ? '`' + f.glyphs.replace(/ /g, '␠') + '`' : 'ASCII + HU + extra (see §2.3)'} |\n`;
+  }
+  blocks.fonts = md;
+  // chrome
+  const chromeRows = specFor(I('c', '', () => { rect('bg', 0, 0, W, H, 'bg'); topBar(1, 'Title', { wifi: 1, demo: 1 }); }));
+  blocks.chrome = mdTable(chromeRows.filter(r => r.id.startsWith('chrome.')), false);
+  // screens
+  const all = GALLERY.flatMap(s => s.items).filter(i => i.spec);
+  for (const item of all) blocks['screen_' + item.spec] = mdTable(specFor(item));
+  return blocks;
+}
+
+/* ------------------------------------------------------------------ export */
+async function exportAll() {
+  const st = document.getElementById('status');
+  let n = 0;
+  const post = (name, blob) => fetch('/save?name=' + encodeURIComponent(name), { method: 'POST', body: blob }).then(r => { if (!r.ok) throw new Error(name); });
+  const blobOf = c => new Promise(res => c.toBlob(res, 'image/png'));
+  for (const { item } of CANVASES) {
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    renderTo(c, item, { q: true }); await post(item.name, await blobOf(c)); n++;
+    st.textContent = `exported ${n}/${CANVASES.length}`;
+  }
+  // thumbnails (144x96, RGB565) and icon masks
+  for (const [key, src] of Object.entries(THUMBS)) {
+    const c = document.createElement('canvas'); c.width = 144; c.height = 96; const x = c.getContext('2d', { willReadFrequently: true });
+    x.imageSmoothingEnabled = true; x.imageSmoothingQuality = 'high'; x.drawImage(src, 0, 0, 144, 96);
+    const im = x.getImageData(0, 0, 144, 96), d = im.data;
+    for (let i = 0; i < d.length; i += 4) { const r = d[i] >> 3, gg = d[i + 1] >> 2, b = d[i + 2] >> 3; d[i] = (r << 3) | (r >> 2); d[i + 1] = (gg << 2) | (gg >> 4); d[i + 2] = (b << 3) | (b >> 2); }
+    x.putImageData(im, 0, 0);
+    const [th, k] = key.split(':'); await post(`thumbs/skin_${k}_${th}`, await blobOf(c));
+  }
+  for (const name of Object.keys(ICONS)) for (const size of [16, 20]) {
+    const c = document.createElement('canvas'); c.width = c.height = size; g = c.getContext('2d'); T = THEMES.dark;
+    icon(null, name, 0, 0, size, '#FFFFFF'); await post(`icons/icon_${name}_${size}`, await blobOf(c));
+  }
+  const r = await fetch('/spec', { method: 'POST', body: JSON.stringify(genSpec()) });
+  st.textContent = `exported ${n} screens + thumbs + icons; spec: ${await r.text()}`;
+  renderAll();
+  return n;
+}
+
+/* review helper: tile screens (quantized) at `scale` into one PNG -> png/review/<out>.png */
+async function reviewSheet(names, out, cols = 1, scale = 2) {
+  const items = names.map(n => CANVASES.find(c => c.item.name === n).item);
+  const rows = Math.ceil(items.length / cols), gap = 8;
+  const sheet = document.createElement('canvas'); sheet.width = cols * W * scale + (cols - 1) * gap; sheet.height = rows * H * scale + (rows - 1) * gap;
+  const sx = sheet.getContext('2d'); sx.fillStyle = '#333'; sx.fillRect(0, 0, sheet.width, sheet.height); sx.imageSmoothingEnabled = false;
+  items.forEach((it, i) => {
+    const c = document.createElement('canvas'); c.width = W; c.height = H; renderTo(c, it, { q: true, touch: document.getElementById('optT').checked });
+    sx.drawImage(c, (i % cols) * (W * scale + gap), Math.floor(i / cols) * (H * scale + gap), W * scale, H * scale);
+  });
+  const blob = await new Promise(res => sheet.toBlob(res, 'image/png'));
+  await fetch('/save?name=review/' + out, { method: 'POST', body: blob });
+  return out;
+}
+
+/* ------------------------------------------------------------------ boot */
+(async function main() {
+  const loads = [];
+  for (const f of Object.values(FONTS)) loads.push(document.fonts.load(fontCss(f), '0123456789ABCabcáő…×−–·'));
+  loads.push(document.fonts.load('600 13px BSC'), document.fonts.load('500 15px BSC'));
+  await Promise.all(loads);
+  LOGO = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = 'assets/surron_logo.png'; });
+  const tmp = document.createElement('canvas'); g = tmp.getContext('2d');
+  buildThumbs();
+  buildPage();
+  renderAll();
+  document.getElementById('warn').textContent = [...new Set(WARN)].join('\n');
+  document.getElementById('optQ').onchange = renderAll;
+  document.getElementById('optT').onchange = renderAll;
+  document.getElementById('opt1x').onchange = e => document.body.classList.toggle('x1', e.target.checked);
+  document.getElementById('btnExport').onclick = () => exportAll().catch(e => (document.getElementById('status').textContent = 'export failed: ' + e.message + ' (run design/serve.py)'));
+  document.getElementById('status').textContent = `${CANVASES.length} screens rendered`;
+  window.__ready = true;
+  if (location.search.includes('export=1')) exportAll();
+})();
+</script>
+</body>
+</html>

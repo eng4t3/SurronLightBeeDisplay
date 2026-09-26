@@ -29,3 +29,7 @@ desktop.ini
 
 # Third-party reference material (kept locally, not published)
 Main/surron_hacking/
+
+# Compiler dependency files from ad-hoc syntax checks
+*.d
+__pycache__/

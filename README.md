@@ -5,7 +5,8 @@ A dashboard for the Sur-Ron e-bike built on a Guition JC3248W535 (ESP32-S3,
 
 ## Features
 
-- 4 gauge skins
+- 4 anti-aliased gauge skins: HALO (ring gauge), PURE (minimal hero number), CHRONO (analog dial), APEX (track HUD with G meter)
+- Dark and light (sunlight) themes, designed in `design/` (mockups + spec)
 - Race timer: 0-50 km/h with split times
 - English / Hungarian UI
 - On-device settings (units, speed calibration, filtering, brightness, etc.)

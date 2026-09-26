@@ -3,6 +3,20 @@
 A dashboard for the Sur-Ron e-bike built on a Guition JC3248W535 (ESP32-S3,
 16MB flash, 8MB OPI PSRAM, 480x320 touch display).
 
+![LightBee Display: HALO, PURE, CHRONO and APEX skins, race timer, skin picker](docs/screenshots/overview.png)
+
+## Screenshots
+
+Captured from the device's framebuffer (480x320, demo data).
+
+| | |
+|---|---|
+| ![HALO skin](docs/screenshots/dash_halo_72.png) **HALO** — ring gauge | ![PURE skin](docs/screenshots/dash_pure_72.png) **PURE** — minimal hero number |
+| ![CHRONO skin](docs/screenshots/dash_chrono_72.png) **CHRONO** — analog dial | ![APEX skin](docs/screenshots/dash_apex_72.png) **APEX** — track HUD with G meter |
+| ![HALO light theme](docs/screenshots/dash_halo_72_light.png) Light (sunlight) theme | ![APEX light theme](docs/screenshots/dash_apex_72_light.png) APEX, light theme |
+| ![Race timer, run finished](docs/screenshots/race_finished.png) 0-50 km/h race timer with splits | ![Race timer ready, Hungarian](docs/screenshots/race_ready_hu.png) Race timer ready (Hungarian UI) |
+| ![Settings, system](docs/screenshots/set_system.png) Settings: brightness, units, theme | ![Settings, skin picker](docs/screenshots/set_skin.png) Settings: skin picker |
+
 ## Features
 
 - 4 anti-aliased gauge skins: HALO (ring gauge), PURE (minimal hero number), CHRONO (analog dial), APEX (track HUD with G meter)
